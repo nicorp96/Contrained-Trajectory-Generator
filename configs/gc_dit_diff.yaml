@@ -1,0 +1,103 @@
+name: "GCDiTDiff"
+target: trainer.trainer_gcr.GCRTrainer
+
+model:
+  target: models.gcd_diff.TrajectorySoR
+  d_state: 6
+  K_cycles: 3
+  guidance_eta: 0.1
+  sequence_len: 128
+  diffusion_model:
+    target: models.transformer_dit.DiTTrj
+    input_dim: 6        # pos: 3, vel: 3
+    cond_dim: 128         # start - pip: 3, goal angle: 2 (sin, cos) , current_angles: 6 : 3*2, stat_vel: 3
+    d_model: 128
+    n_heads: 4
+    n_blocks: 3
+    dropout: 0.1
+    num_inference_steps: 12
+    guidance_scale: 1.5
+    cfg_drop_prob: 0.1
+    noise_scheduler:
+      _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+      num_train_timesteps: 1000
+      beta_start: 0.0001
+      beta_end: 0.02
+      beta_schedule: squaredcos_cap_v2
+      clip_sample: True
+      set_alpha_to_one: True
+      steps_offset: 0
+      prediction_type: epsilon # or sample or v_prediction
+  constraints_attention:
+    d_model: 128
+    n_heads: 4
+    d_state: 6
+    d_ctx: 8
+    ff_mult: 4
+    dropout: 0.1
+  constraint_analyzer:
+    softplus_beta: 10.0
+    limits:
+      v_max: 0.85
+      v_min: 0.12
+
+training:
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 1200
+  use_ema: True
+  optimizer: "adam"
+  log_dir: "/mnt/data_nrp/research_t_opt/runs/training"
+  log_eval_dir: "/mnt/data_nrp/research_t_opt/runs/inference"
+  output_dir: "/mnt/data_nrp/research_t_opt/logs"
+  val_every: 2
+  save_every: 5
+  checkpoint_path: "logs"
+  device: "cuda:0"
+  plotting: true
+  tqdm_interval_sec: 1.0
+  from_ckp: false
+  train_with_sampling: false
+  ckpt_name: "SOR/20251118-175851/logs/checkpoint_395.pth"
+  scheduler:
+    name: cosine              # Options: linear, cosine, step, constant, etc.
+    num_warmup_steps: 5000     # Optional, required for warmup-based schedulers
+  loss_weights:
+    fape: 1.0
+    vel: 0.25
+    jerk: 0.05
+    constraints: 0.5
+    timing: 0.2
+    conf: 0.1
+
+ema:
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataset:
+  target: dataset.dataset_avoiding.AvoidingTrajDataset
+  root_dir: "/mnt/data_nrp/research_constrained_diffusion/data/data/avoiding/data"
+  val: true
+  val_ratio: 0.2
+  horizon: 16
+  max_path_length: 200
+  expand_goal: 0
+
+  state_shapes:
+    desired_pos:
+      shape: 2
+      method_norm: "minmax"
+    current_pos:
+      shape: 2
+      method_norm: "minmax"
+  actions_shapes:
+    vel:
+      shape: 2
+      method_norm: "minmax"
+  environment_shapes:
+    goal:
+      shape: 2
+      method_norm: "minmax"
