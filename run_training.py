@@ -5,7 +5,7 @@ from common.get_class import get_class_dict
 from common.utils import load_config
 import torch
 
-BASE_PATH_PRJ = "/home/nrodriguez/Documents/DProjekt/research_t_opt/"
+BASE_PATH_PRJ = "/home/nrodriguez/Documents/research-2/Contrained-Trajectory-Generator/"
 
 
 def main(args):

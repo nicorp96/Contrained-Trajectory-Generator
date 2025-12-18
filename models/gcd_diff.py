@@ -30,21 +30,7 @@ class ConstraintAnalyzer(nn.Module):
 
     def __init__(self, cfg: Dict):
         super().__init__()
-        lim = cfg.get("limits", {})
-        self.v_max = lim.get("v_max", 30.0)  # float or None
-        self.v_min = lim.get("v_min", -30.0)  # float or None
-        # TODO: is this necessary?: weights for the two penalties
-        w = cfg.get("weights", {})
-        self.w_max = w.get("over_speed", 1.0)
-        self.w_min = w.get("under_speed", 1.0)
-        # smooth hinge via softplus for stable grads
-        self.softplus_beta = cfg.get("softplus_beta", 10.0)
-        self.eps = 1e-8
-
-        # optional time weighting window (e.g., downweight endpoints)
-        self.time_weight = cfg.get(
-            "time_weight", None
-        )  # "middle", "flat", or custom tensor via setter
+        self.cfg = cfg
         self.state_normalizer = None
         self.obs_normalizer = None
         self.environment_normalizer = None
@@ -73,9 +59,7 @@ class ConstraintAnalyzer(nn.Module):
         extras: Optional[Dict[str, torch.Tensor]] = None,
         mask: Optional[torch.Tensor] = None,  # [B,N] True for valid
     ) -> ConstraintOutputs:
-        # TODO: Physical units -> require denormalization?
-        # 1) Work on a detached copy of normalized vel so the guidance
-        #    gradient does not backprop into the rest of the network.
+
         vel_nm_orig = states["vel_ned"]  # [B,N,3] normalized from model
         vel_nm = vel_nm_orig.detach().requires_grad_(True)  # leaf for autograd
 
@@ -244,7 +228,10 @@ class DiffusionTrajectory(nn.Module):
         guidance_scale = self.guidance_scale
         x = noise
         mask = torch.zeros_like(noise, dtype=torch.bool, device=device)
-        mask[:, 0:1, :] = torch.ones_like(traj_start, dtype=torch.bool, device=device)
+        # TODO: Not Hardcoding -> use action dim
+        mask[:, 0:1, 2:] = torch.ones_like(
+            traj_start[:, :1, 2:], dtype=torch.bool, device=device
+        )
         scheduler.set_timesteps(self.inference_steps, device=device)
         uncond = torch.zeros_like(ctx)
         x = apply_inpainting(x, mask, traj_start, noise=False)
@@ -262,6 +249,8 @@ class DiffusionTrajectory(nn.Module):
             guided = out_cond
             if guidance_scale == 1.0:
                 guided = out_cond
+            elif guidance_scale == 0.0:
+                guided = out_uncond
             elif pred_type in ("epsilon", "v_prediction"):
                 guided = out_uncond + guidance_scale * (out_cond - out_uncond)
             x_prev = scheduler.step(guided, t_scalar, x_t).prev_sample
@@ -272,12 +261,17 @@ class DiffusionTrajectory(nn.Module):
             x = apply_inpainting(x, mask, traj_start, noise=False)
         return x
 
+
     def compute_loss(self, output, target):
-        loss = torch.nn.functional.mse_loss(output, target)
-        return loss
+            loss = torch.nn.functional.mse_loss(output, target)
+            return loss
 
     def forward(
-        self, input: torch.Tensor, ctx: torch.Tensor, device: torch.device
+            self,
+            input: torch.Tensor,
+            ctx: torch.Tensor,
+            start_trj: torch.Tensor,
+            device: torch.device,
     ) -> torch.Tensor:
         scheduler = self.scheduler
         denoiser_net = self.denoiser_net
@@ -287,11 +281,11 @@ class DiffusionTrajectory(nn.Module):
             (input.size(0),),
             device=device,
         )
-        start_traj_cond = input[:, 0, :].unsqueeze(1)
+        start_traj_cond = start_trj.unsqueeze(1)
         noise = torch.randn_like(input)
         mask = torch.zeros_like(input, dtype=torch.bool, device=device)
-        mask[:, 0:1, :] = torch.ones_like(
-            start_traj_cond, dtype=torch.bool, device=device
+        mask[:, 0:1, 2:] = torch.ones_like(
+            start_traj_cond[:, :1, 2:], dtype=torch.bool, device=device
         )
         # TODO: Apply Inpainting (start) should be zero at t=0
         input = apply_inpainting(input, mask, x_known=start_traj_cond, noise=True)
@@ -302,12 +296,15 @@ class DiffusionTrajectory(nn.Module):
         )
         if self.cfg:
             cfg_p = self.cfg_drop_prob
+            drop_mask = torch.zeros_like(ctx).float()
             if cfg_p > 0.0:
                 B = ctx.size(0)
                 drop_mask = (
-                    torch.rand(B, 1, device=device) < cfg_p
+                        torch.rand(B, 1, device=device) < cfg_p
                 ).float()  # 1 = drop -> unconditional
-                ctx = ctx * (1.0 - drop_mask)  # zeros become the "null" condition
+            elif cfg_p == 0.0:
+                drop_mask = torch.ones_like(ctx).float()
+            ctx = ctx * (1.0 - drop_mask)  # zeros become the "null" condition
 
         noise_pred = denoiser_net(states_noisy, timesteps, ctx)
         pred_type = scheduler.config.prediction_type
@@ -429,11 +426,11 @@ class TrajectorySoR(nn.Module):
 
     @torch.no_grad()
     def conditional_sample(
-        self,
-        states: Dict[str, torch.Tensor],
-        actions: Dict[str, torch.Tensor],
-        environment: Dict[str, torch.Tensor],
-        device: torch.device,
+            self,
+            states: Dict[str, torch.Tensor],
+            actions: Dict[str, torch.Tensor],
+            environment: Dict[str, torch.Tensor],
+            device: torch.device,
     ):
         states_gt_nm = dict_to_tensor_concat(states, dim=2, device=device)
         action_gt_nm = dict_to_tensor_concat(actions, dim=2, device=device)
@@ -442,10 +439,14 @@ class TrajectorySoR(nn.Module):
         trajectory = torch.concatenate([action_gt_nm, states_gt_nm], dim=-1).to(
             device, dtype=torch.float32
         )
-        current_traj_0 = trajectory[:, 0, :]
-        cond = torch.cat([current_traj_0, env_nm], dim=-1).to(
-            device, dtype=torch.float32
-        )
+        current_state_0 = states_gt_nm[:, 0, :].to(device, dtype=torch.float32)
+        # cond = torch.cat([current_traj_0, env_nm], dim=-1).to(
+        #     device, dtype=torch.float32
+        # )
+        current_traj_0 = torch.zeros_like(trajectory[:, 0, :])
+        # TODO: use action dim not hardcoded
+        cond = current_state_0
+        current_traj_0[:, 2:] = current_state_0
         cond_ctx = self.constraints_attention(trajectory, cond)
         noise = torch.randn_like(trajectory).to(device, dtype=torch.float32)
         trajectory_pred = self.diffusion_model.sample(
@@ -454,11 +455,11 @@ class TrajectorySoR(nn.Module):
         return {"traj_pred": trajectory_pred, "trj_gt": trajectory}
 
     def forward(
-        self,
-        states: Dict[str, torch.Tensor],
-        actions: Dict[str, torch.Tensor],
-        environment: Dict[str, torch.Tensor],
-        device: torch.device,
+            self,
+            states: Dict[str, torch.Tensor],
+            actions: Dict[str, torch.Tensor],
+            environment: Dict[str, torch.Tensor],
+            device: torch.device,
     ):
         """
         states: Dict of tensors with keys like 'position', 'velocity', each of shape [B, N, D]
@@ -469,16 +470,24 @@ class TrajectorySoR(nn.Module):
         states_gt_nm = dict_to_tensor_concat(states, dim=2, device=device)
         action_gt_nm = dict_to_tensor_concat(actions, dim=2, device=device)
         env_nm = dict_to_tensor_concat(environment, dim=-1, device=device)
+
         # Trajectory: States and Actions: (s_0, a_0, s_1, s_2, ..., s_T, a_T)
         trajectory = torch.concatenate([action_gt_nm, states_gt_nm], dim=-1).to(
             device, dtype=torch.float32
         )
-        current_traj_0 = trajectory[:, 0, :]
-        cond = torch.cat([current_traj_0, env_nm], dim=-1).to(
-            device, dtype=torch.float32
-        )
+
+        current_state_0 = states_gt_nm[:, 0, :].to(device, dtype=torch.float32)
+        # cond = torch.cat([current_traj_0, env_nm], dim=-1).to(
+        #     device, dtype=torch.float32
+        # )
+        current_traj_0 = torch.zeros_like(trajectory[:, 0, :])
+        # TODO: use action dim not hardcoded
+        current_traj_0[:, 2:] = current_state_0
+        cond = current_state_0
         cond_ctx = self.constraints_attention(trajectory, cond)
-        loss_diff = self.diffusion_model(trajectory, cond_ctx, device=device)
+        loss_diff = self.diffusion_model(
+            trajectory, cond_ctx, current_traj_0, device=device
+        )
         loss_total = loss_diff  # + loss_cycle + loss_constraints
         return {
             "loss": loss_total,

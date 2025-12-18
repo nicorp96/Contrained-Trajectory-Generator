@@ -186,23 +186,23 @@ class GCRTrainer(BaseTrainer):
     def plotting(self, output, target, step, epoch, name="val"):
         config = self.config
         out_dict = self.split_state_tensor(
-            output[:, :, :4], config["dataset"]["state_shapes"]
+            output[:, :, 2:], config["dataset"]["state_shapes"]
         )
-        out_dict = self.state_normalizer(out_dict)
+        out_dict = self.state_normalizer.unnormalize(out_dict)
 
         out_action_dict = self.split_state_tensor(
-            output[:, :, 4:], config["dataset"]["actions_shapes"]
+            output[:, :, :2], config["dataset"]["actions_shapes"]
         )
-        out_action_dict = self.action_normalizer(out_action_dict)
+        out_action_dict = self.action_normalizer.unnormalize(out_action_dict)
         out_dict.update(out_action_dict)
         target_dict = self.split_state_tensor(
-            target[:, :, :4], config["dataset"]["state_shapes"]
+            target[:, :, 2:], config["dataset"]["state_shapes"]
         )
-        target_dict = self.state_normalizer(target_dict)
+        target_dict = self.state_normalizer.unnormalize(target_dict)
         target_action_dict = self.split_state_tensor(
-            target[:, :, 4:], config["dataset"]["actions_shapes"]
+            target[:, :, :2], config["dataset"]["actions_shapes"]
         )
-        target_action_dict = self.action_normalizer(target_action_dict)
+        target_action_dict = self.action_normalizer.unnormalize(target_action_dict)
         target_dict.update(target_action_dict)
 
         for key in out_dict.keys():
