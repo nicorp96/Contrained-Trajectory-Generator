@@ -1,27 +1,21 @@
-name: "OnlyDiff_SOR"
-target: trainer.trainer_sor.SORTrainer
+name: "GCDiTDiffEnergyGrad"
+target: trainer.trainer_gcr.GCRTrainer
 
 model:
-  target: models.sor_diff.TrajectorySoR
+  target: models.gcd_diff.TrajectorySoR
   d_state: 6
   K_cycles: 3
-  guidance_eta: 0.1
+
   sequence_len: 128
   diffusion_model:
     target: models.transformer_dit.DiTTrj
-    input_dim: 6        # pos: 3, vel: 3
-    cond_dim: 128         # start - pip: 3, goal angle: 2 (sin, cos) , current_angles: 6 : 3*2, stat_vel: 3
-    diffusion_t_embed_dim: 128
+    input_dim: 6
+    cond_dim: 128
     d_model: 128
-    down_dims: [256, 512, 1024] # [16, 32, 64], [32, 64, 128], [256, 512, 1024]
-    kernel_size: 3
-    n_blocks: 8
-    cond_film: True
-    time_encoder: False
-    time_t_embed_dim: 128
+    n_heads: 4
+    n_blocks: 3
+    dropout: 0.1
     num_inference_steps: 12
-    guidance_scale: 1.5
-    cfg_drop_prob: 0.1
     noise_scheduler:
       _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
       num_train_timesteps: 1000
@@ -32,28 +26,39 @@ model:
       set_alpha_to_one: True
       steps_offset: 0
       prediction_type: epsilon # or sample or v_prediction
+    guidance:
+      target: models.utils.guidance.EnergyGuidance
+      guidance_eta: 0.1
+      guidance_scale: 0.0
+      cfg_drop_prob: 0.0
   constraints_attention:
     d_model: 128
     n_heads: 4
     d_state: 6
-    d_ctx: 128
+    d_ctx: 4
     ff_mult: 4
     dropout: 0.1
   constraint_analyzer:
-    softplus_beta: 10.0
-    limits:
-      v_max: 0.85
-      v_min: 0.12
-  obs_encoder:
-    param_shapes:
-      start_position:
-        type: linear
-        d_obs: 3
-        d_model: 64
-      start_velocity:
-        type: linear
-        d_obs: 3
-        d_model: 64
+    target: models.utils.constraints.ObstacleConstraintGrad # ObstacleConstraint
+    constraint_obstacles:
+      obstacle_1:
+        center: [ 0.4, 0.08 ]
+        radius: 0.06
+      obstacle_2:
+        center: [ 0.6, 0.08 ]
+        radius: 0.06
+      obstacle_3:
+        center: [ 0.5, -0.1 ]
+        radius: 0.06
+      obstacle_4:
+        center: [ 0.4, 0.08 ]
+        radius: 0.08
+      obstacle_5:
+        center: [ 0.6, 0.08 ]
+        radius: 0.08
+      obstacle_6:
+        center: [ 0.5, -0.09 ]
+        radius: 0.08
 
 training:
   batch_size: 128
@@ -71,7 +76,7 @@ training:
   plotting: true
   tqdm_interval_sec: 1.0
   from_ckp: false
-  train_with_sampling: true
+  train_with_sampling: false
   ckpt_name: "SOR/20251118-175851/logs/checkpoint_395.pth"
   scheduler:
     name: cosine              # Options: linear, cosine, step, constant, etc.
@@ -92,34 +97,26 @@ ema:
   max_value: 0.9999
 
 dataset:
-  target: dataset.dataset_trajectory_simple.SimpleTrajDataset
-  root_dir: "/home/nrodriguez/Documents/DProjekt/research_t_opt/synth_trajs"
+  target: dataset.dataset_avoiding.AvoidingTrajDataset
+  root_dir: "/mnt/data_nrp/research_constrained_diffusion/data/data/avoiding/data"
   val: true
   val_ratio: 0.2
-  return_raw: false
-  cache_last_shard: true
-  expect_constant_N: true
+  horizon: 16
+  max_path_length: 200
   expand_goal: 0
+
   state_shapes:
-    position:
-      shape: 3
-      method_norm: "standard"
-      factor: 1.0
-    vel_ned:
-      shape: 3
-      method_norm: "standard"
-      factor: 1.0
-
-  observation_shapes:
-    start_position:
-      shape: 3
-      method_norm: "standard"
-    start_velocity:
-      shape: 3
-      method_norm: "standard"
-
+    desired_pos:
+      shape: 2
+      method_norm: "minmax"
+    current_pos:
+      shape: 2
+      method_norm: "minmax"
+  actions_shapes:
+    vel:
+      shape: 2
+      method_norm: "minmax"
   environment_shapes:
     goal:
-      shape: 3
-      method_norm: "standard"
-      factor: 1.0
+      shape: 2
+      method_norm: "minmax"

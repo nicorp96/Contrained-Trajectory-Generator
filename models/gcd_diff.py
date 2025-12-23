@@ -8,17 +8,19 @@ from typing import Dict, Optional
 
 
 from common.utils import dict_to_tensor_concat
+from common.get_class import get_class_dict
 from models.utils.diffusion import apply_inpainting
 from models.utils.normalizer import DictNormalizer
-from common.get_class import get_class_dict
+
+from models.utils.constraints import ObstacleConstraint
 
 
 @dataclass
 class ConstraintOutputs:
-    grad_pos: (
+    residual: (
         torch.Tensor
     )  # [B,N,3]  ∂E/∂position (in *normalized* space unless return_denorm_grads=True)
-    grad_vel: torch.Tensor  # [B,N,3]  ∂E/∂velocity
+    # grad_energy: torch.Tensor  # [B,N,3]  ∂E/∂velocity
     energy: torch.Tensor  # [B]      total scalar energy
 
 
@@ -31,10 +33,16 @@ class ConstraintAnalyzer(nn.Module):
     def __init__(self, cfg: Dict):
         super().__init__()
         self.cfg = cfg
-        self.state_normalizer = None
-        self.obs_normalizer = None
-        self.environment_normalizer = None
-
+        self.constraints = {}
+        for key in cfg.keys():
+            if key == "constraint_obstacles":
+                config_const = cfg[key]
+                if "target" not in config_const.keys():
+                    config_const.update(
+                        {"target": "models.utils.constraints.ObstacleConstraintGrad"}
+                    )
+                constraint = get_class_dict(config_const)
+                self.constraints["states"] = constraint
     def set_normalizer(
         self,
         state_normalizer: DictNormalizer,
@@ -45,111 +53,32 @@ class ConstraintAnalyzer(nn.Module):
         self.obs_normalizer = obs_normalizer
         self.environment_normalizer = environment_normalizer
 
-    def set_time_weight(self, w_t: torch.Tensor):
-        """Optionally set a [N] or [1,N] or [B,N] time weight (will be broadcast)."""
-        self.time_weight = w_t
-
     def forward(
         self,
-        states: Dict[
-            str, torch.Tensor
-        ],  # {"position":[B,N,3], "vel_ned":[B,N,3]} (normalized)
-        actions: Dict[str, torch.Tensor],  # unused here
-        environment: Dict[str, torch.Tensor],  # unused here
+        states: Dict[str, torch.Tensor],
+        actions: Dict[str, torch.Tensor],
+        environment: Dict[str, torch.Tensor],
         extras: Optional[Dict[str, torch.Tensor]] = None,
-        mask: Optional[torch.Tensor] = None,  # [B,N] True for valid
+        trajectory: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> ConstraintOutputs:
-
-        vel_nm_orig = states["vel_ned"]  # [B,N,3] normalized from model
-        vel_nm = vel_nm_orig.detach().requires_grad_(True)  # leaf for autograd
-
-        # 2) Build a shallow copy of the state dict with this new vel_ned
-        state_for_unnorm = dict(states)
-        state_for_unnorm["vel_ned"] = vel_nm
-
-        # 3) Unnormalize via your dict normalizer (differentiable)
-        state_unorm = self.state_normalizer.unnormalize(state_for_unnorm)
-        vel = state_unorm["vel_ned"]
-        B, N, _ = vel.shape
-        if mask is None:
-            mask = torch.ones(B, N, dtype=torch.bool, device=vel.device)
-        m = mask.float()
-        # time weights
-        if (
-            self.time_weight is None
-            or isinstance(self.time_weight, str)
-            and self.time_weight == "flat"
-        ):
-            w_t = torch.ones(B, N, device=vel.device)
-        elif isinstance(self.time_weight, str) and self.time_weight == "middle":
-            # cosine window: low at ends, high in middle
-            t = torch.linspace(0, 1, N, device=vel.device)
-            w = 0.5 - 0.5 * torch.cos(2 * torch.pi * t)  # [N]
-            w_t = w[None, :].expand(B, N)
-        else:
-            w_t = self.time_weight
-            while w_t.dim() < 2:
-                w_t = w_t.unsqueeze(0)
-            if w_t.size(0) == 1:
-                w_t = w_t.expand(B, -1)
-
-        speed = torch.linalg.norm(vel, dim=-1)  # [B,N]
-        beta = self.softplus_beta
-        per_traj_E = torch.zeros(B, device=vel.device)  # [B]
-        E_terms = []
-
-        # Over-speed penalty: softplus(speed - v_max)
-        if self.v_max is not None:
-            over = torch.nn.functional.softplus(speed - self.v_max, beta=beta)  # ~relu
-            E_max = ((over**2) * m * w_t).sum(dim=1) / (m.sum(dim=1) + self.eps)  # [B]
-            E_terms.append(self.w_max * E_max)
-            per_traj_E = per_traj_E + self.w_max * E_max
-        # Under-speed penalty: softplus(v_min - speed)
-        if self.v_min is not None:  # and self.v_min > 0:
-            under = torch.nn.functional.softplus(self.v_min - speed, beta=beta)
-            E_min = ((under**2) * m * w_t).sum(dim=1) / (m.sum(dim=1) + self.eps)  # [B]
-            E_terms.append(self.w_min * E_min)
-            per_traj_E = per_traj_E + self.w_min * E_min
-
-            # Early exit if no terms
-        if (self.v_max is None) and (self.v_min is None):
-            zeros = torch.zeros(B, device=vel.device)
-            return ConstraintOutputs(
-                grad_pos=torch.zeros(B, N, 3, device=vel.device),
-                grad_vel=torch.zeros(B, N, 3, device=vel.device),
-                energy=zeros,
-            )
-
-        E_scalar = per_traj_E.sum()  # scalar
-
-        # 7) Gradient w.r.t. *normalized* velocity vel_nm
-        if torch.is_grad_enabled() and vel_nm.requires_grad:
-            (grad_v_nm,) = torch.autograd.grad(
-                E_scalar,
-                (vel_nm,),
-                retain_graph=False,
-                create_graph=False,
-            )
-        else:
-            grad_v_nm = torch.zeros_like(vel_nm)
-        # E_sum = E.sum()  # scalar
-        # gradients w.r.t. *denormalized* vel
-        # if torch.is_grad_enabled():
-        #     (grad_vel_denorm,) = torch.autograd.grad(
-        #         E_sum, (vel,), retain_graph=False, create_graph=False
-        #     )
-        # else:
-        #     grad_vel_denorm = torch.zeros_like(vel)
-        # TODO: map back to normalized space:
-        # v_real = v_nm * std + mean  =>  dE/dv_nm = dE/dv_real * std
-        # grad_vel_nm = grad_vel_denorm * self.std_vel
-
+        constraints = self.constraints
+        energy = []
+        residuals = []
+        for key in self.constraints.keys():
+            if key == "states":
+                # TODO: constraint should have a states names that are needed
+                # value = torch.cat([states[k] for k in states_names_dict.keys()], dim=-1)
+                value = torch.cat([states["desired_pos"] , states["current_pos"]], dim=-1)  # .detach().clone()
+                dict_out = constraints[key](value)
+                energy.append(dict_out["energy_t"])
+                residuals.append(dict_out["residual_t"])
+        energy_all = torch.stack(energy, dim=0).sum(dim=0)  # [B]
+        residuals_all = torch.stack(residuals, dim=0).sum(dim=0)  # [B,H] (etc.)
         return ConstraintOutputs(
-            grad_pos=torch.zeros_like(
-                vel
-            ),  # no position constraint in this minimalist version
-            grad_vel=grad_v_nm,  # torch.zeros_like(vel),
-            energy=per_traj_E.detach(),  # .detach(),
+            residual=residuals_all,
+            # grad_vel=grad_v_nm,
+            energy=energy_all,
         )
 
 
@@ -207,25 +136,28 @@ class DiffusionTrajectory(nn.Module):
         self.denoiser_net = get_class_dict(self.config)
         self.scheduler = None
         self.inference_steps = config.get("num_inference_steps", 12)
-        self.guidance_scale = config.get("guidance_scale", 0.0)
-        self.cfg_drop_prob = config.get("cfg_drop_prob", 0.0)
-        self.cfg = True if "cfg_drop_prob" in config else False
+        self.guidance_scale = config["guidance"].get("guidance_scale", 0.0)
+        self.cfg_drop_prob = config["guidance"].get("cfg_drop_prob", 0.0)
+        self.cfg = True if "cfg_drop_prob" in config["guidance"] else False
+        self.guidance_fuc = get_class_dict(self.config["guidance"])
 
     def set_scheduler(self, scheduler: Optional[DDIMScheduler]):
         self.scheduler = scheduler
 
     @torch.no_grad()
     def sample(
-        self,
-        noise: torch.Tensor,
-        ctx: torch.Tensor,
-        traj_start: torch.Tensor,
+            self,
+            noise: torch.Tensor,
+            ctx: torch.Tensor,
+            traj_start: torch.Tensor,
+            **kwargs,
     ) -> torch.Tensor:
         device = noise.device
         scheduler = self.scheduler
         # TODO: Use EMA model for denoiser network
         model = self.denoiser_net
-        guidance_scale = self.guidance_scale
+        # guidance_scale = self.guidance_scale
+        guidance_fuc = self.guidance_fuc
         x = noise
         mask = torch.zeros_like(noise, dtype=torch.bool, device=device)
         # TODO: Not Hardcoding -> use action dim
@@ -233,45 +165,24 @@ class DiffusionTrajectory(nn.Module):
             traj_start[:, :1, 2:], dtype=torch.bool, device=device
         )
         scheduler.set_timesteps(self.inference_steps, device=device)
-        uncond = torch.zeros_like(ctx)
         x = apply_inpainting(x, mask, traj_start, noise=False)
-
-        def guide_and_step(x_t, t_scalar):
-            # batched uncond/cond forward
-            traj_in = torch.cat([x_t, x_t], dim=0)
-            cond_in = torch.cat([uncond, ctx], dim=0)
-            # t_in = t_scalar.expand(noise.shape[0]).to(noise.device)
-            t_in = t_scalar.to(noise.device)
-
-            model_out = model(traj_in, t_in, cond_in)
-            out_uncond, out_cond = model_out.chunk(2, dim=0)
-            pred_type = scheduler.config.prediction_type
-            guided = out_cond
-            if guidance_scale == 1.0:
-                guided = out_cond
-            elif guidance_scale == 0.0:
-                guided = out_uncond
-            elif pred_type in ("epsilon", "v_prediction"):
-                guided = out_uncond + guidance_scale * (out_cond - out_uncond)
-            x_prev = scheduler.step(guided, t_scalar, x_t).prev_sample
-            return x_prev
-
         for t in scheduler.timesteps:
-            x = guide_and_step(x, t)
+            x = guidance_fuc(x, t, ctx, scheduler, model, **kwargs)
             x = apply_inpainting(x, mask, traj_start, noise=False)
         return x
 
 
     def compute_loss(self, output, target):
-            loss = torch.nn.functional.mse_loss(output, target)
-            return loss
+        loss = torch.nn.functional.mse_loss(output, target)
+        return loss
 
     def forward(
-            self,
-            input: torch.Tensor,
-            ctx: torch.Tensor,
-            start_trj: torch.Tensor,
-            device: torch.device,
+        self,
+        input: torch.Tensor,
+        ctx: torch.Tensor,
+        start_trj: torch.Tensor,
+        device: torch.device,
+        **kwargs,
     ) -> torch.Tensor:
         scheduler = self.scheduler
         denoiser_net = self.denoiser_net
@@ -294,13 +205,23 @@ class DiffusionTrajectory(nn.Module):
         states_noisy = apply_inpainting(
             states_noisy, mask, x_known=start_traj_cond, noise=False
         )
+
+        # if "constraints_out" in kwargs.keys():
+        #     constraint: ConstraintOutputs = kwargs["constraints_out"]
+        #     energy = ConstraintOutputs.energy
+        #     (grad_v_nm,) = torch.autograd.grad(
+        #         energy,
+        #         states_noisy,
+        #         retain_graph=False,
+        #         create_graph=False,
+        #     )
         if self.cfg:
             cfg_p = self.cfg_drop_prob
             drop_mask = torch.zeros_like(ctx).float()
             if cfg_p > 0.0:
                 B = ctx.size(0)
                 drop_mask = (
-                        torch.rand(B, 1, device=device) < cfg_p
+                    torch.rand(B, 1, device=device) < cfg_p
                 ).float()  # 1 = drop -> unconditional
             elif cfg_p == 0.0:
                 drop_mask = torch.ones_like(ctx).float()
@@ -426,19 +347,21 @@ class TrajectorySoR(nn.Module):
 
     @torch.no_grad()
     def conditional_sample(
-            self,
-            states: Dict[str, torch.Tensor],
-            actions: Dict[str, torch.Tensor],
-            environment: Dict[str, torch.Tensor],
-            device: torch.device,
+        self,
+        states: Dict[str, torch.Tensor],
+        actions: Dict[str, torch.Tensor],
+        environment: Dict[str, torch.Tensor],
+        device: torch.device,
     ):
         states_gt_nm = dict_to_tensor_concat(states, dim=2, device=device)
         action_gt_nm = dict_to_tensor_concat(actions, dim=2, device=device)
         env_nm = dict_to_tensor_concat(environment, dim=-1, device=device)
+        analyser = self.constraint_analyzer
         # Trajectory: States and Actions: (s_0, a_0, s_1, s_2, ..., s_T, a_T)
         trajectory = torch.concatenate([action_gt_nm, states_gt_nm], dim=-1).to(
             device, dtype=torch.float32
         )
+
         current_state_0 = states_gt_nm[:, 0, :].to(device, dtype=torch.float32)
         # cond = torch.cat([current_traj_0, env_nm], dim=-1).to(
         #     device, dtype=torch.float32
@@ -450,16 +373,19 @@ class TrajectorySoR(nn.Module):
         cond_ctx = self.constraints_attention(trajectory, cond)
         noise = torch.randn_like(trajectory).to(device, dtype=torch.float32)
         trajectory_pred = self.diffusion_model.sample(
-            noise=noise, ctx=cond_ctx, traj_start=current_traj_0.unsqueeze(1)
+            noise=noise,
+            ctx=cond_ctx,
+            traj_start=current_traj_0.unsqueeze(1),
+            analyzer=analyser,
         )
         return {"traj_pred": trajectory_pred, "trj_gt": trajectory}
 
     def forward(
-            self,
-            states: Dict[str, torch.Tensor],
-            actions: Dict[str, torch.Tensor],
-            environment: Dict[str, torch.Tensor],
-            device: torch.device,
+        self,
+        states: Dict[str, torch.Tensor],
+        actions: Dict[str, torch.Tensor],
+        environment: Dict[str, torch.Tensor],
+        device: torch.device,
     ):
         """
         states: Dict of tensors with keys like 'position', 'velocity', each of shape [B, N, D]
@@ -493,7 +419,6 @@ class TrajectorySoR(nn.Module):
             "loss": loss_total,
             "loss_diff": loss_diff,
         }  # , "loss_cycle": loss_cycle, "loss_constraints": loss_constraints
-
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
