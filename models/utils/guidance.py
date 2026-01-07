@@ -152,7 +152,7 @@ class EnergyGuidance(BaseGuidance):
 class EnergyGuidanceGrad(BaseGuidance):
     def __init__(self, config):
         super().__init__(config)
-        self.eta = config["guidance_eta"]
+        self.eta = 1.0  # config["guidance_eta"]
 
     def __call__(
         self,
@@ -189,41 +189,12 @@ class EnergyGuidanceGrad(BaseGuidance):
             trajectory=x_var,
             mask=None,
         )
-        grad_E = torch.zeros_like(input, device=device, dtype=input.dtype)
-        grad_E_des_pos = out.energy
-        grad_E[:, :, 2:4] = grad_E_des_pos[:, :, 2:]
-        denoised = model(input, t, cond_zero)
-        # map energy grad into denoiser output space
-        pred_type = scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            # choose sigma_t (diffusers schedulers vary; DDIM uses alpha_cumprod commonly)
-            # robust fallback: compute sigma from alpha_cumprod
-            t_idx = (scheduler.timesteps == t).nonzero(as_tuple=True)[0].item()
-            alpha = scheduler.alphas_cumprod[scheduler.timesteps[t_idx]].to(
-                input.device
-            )
-            sigma_t = torch.sqrt(1.0 - alpha)
-
-            x_prev = denoised - (eta * sigma_t) * grad_E
-
-        elif pred_type == "v_prediction":
-            # rough-but-works: treat like epsilon guidance after converting v->eps
-            t_idx = (scheduler.timesteps == t).nonzero(as_tuple=True)[0].item()
-            alpha = scheduler.alphas_cumprod[scheduler.timesteps[t_idx]].to(
-                input.device
-            )
-            sqrt_alpha = torch.sqrt(alpha)
-            sqrt_one_minus = torch.sqrt(1.0 - alpha)
-
-            # v -> eps: eps = sqrt(1-a)*x_t + sqrt(a)*v  (common diffusers convention)
-            eps = sqrt_one_minus * input + sqrt_alpha * denoised
-
-            eps = eps + (eta * sqrt_one_minus) * grad_E
-
-            # eps -> v: v = (eps - sqrt(1-a)*input) / sqrt(a)
-            x_prev = (eps - sqrt_one_minus * input) / (sqrt_alpha + 1e-8)
-
-        else:
-            raise TypeError(f"Unknown prediction type: {pred_type}")
-
+        grad_E = out.energy
+        # TODO: Now only for Epsilon prediction -> later extend to v_prediction
+        alpha_bar = scheduler.alphas_cumprod[t.long()]
+        sigma_t = torch.sqrt(1.0 - alpha_bar).view(1, 1, 1).to(input.device)  # [1,1,1]
+        eps = model(input, t, cond_zero)
+        # sigma_t = scheduler.sigmas[t]
+        eps_guided = eps + sigma_t * eta * grad_E
+        x_prev = scheduler.step(eps_guided, t, input).prev_sample
         return x_prev

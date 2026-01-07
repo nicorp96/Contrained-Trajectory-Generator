@@ -123,6 +123,8 @@ class Normalizer(nn.Module):
                 # return torch.where(mask, (x - self.mean) / (self.std + self.eps), x)
             return (x - self.mean) / (self.std + self.eps)
         elif self.method == "minmax":
+            self.max = self.max.to(x.device)
+            self.min = self.min.to(x.device)
             return 2 * (x - self.min) / (self.max - self.min + self.eps) - 1
         elif self.method == "path_len":
             seg_len = np.linalg.norm(np.diff(x, axis=0), axis=1)
@@ -160,6 +162,8 @@ class Normalizer(nn.Module):
                 # return torch.where(mask, x * (self.std + self.eps) + self.mean, x)
             return x * (self.std + self.eps) + self.mean
         elif self.method == "minmax":
+            self.max = self.max.to(x.device)
+            self.min = self.min.to(x.device)
             return 0.5 * (x + 1) * (self.max - self.min + self.eps) + self.min
         elif self.method == "path_len":
             seg_len = np.linalg.norm(np.diff(x, axis=0), axis=1)

@@ -58,9 +58,6 @@ class GCRTrainer(BaseTrainer):
             conf=config["training"]["loss_weights"]["conf"],
         )
         self.model.set_scheduler(self.noise_scheduler)
-        # self.model.set_normalizer(
-        #     normalizer=self.normalizer,
-        # )
 
     def setup_model(self):
         self.model = get_class_dict(self.config["model"])
@@ -91,6 +88,9 @@ class GCRTrainer(BaseTrainer):
     def setup_normalizer(self):
         self.state_normalizer, self.action_normalizer, self.env_normalizer = (
             self.train_dataset.dataset.get_normalizer()
+        )
+        self.model.set_normalizer(
+            self.state_normalizer, self.action_normalizer, self.env_normalizer
         )
 
     def compute_loss(self, output, target):

@@ -47,9 +47,12 @@ class DiffPolicy:
         dataset_dict = self.config["dataset"]
         train_dataset, validation_dataset = get_ds_from_cfg(dataset_dict)
         self.train_dataset = train_dataset
-        # TODO: load normalizer from
+        # TODO: load normalizer from dict
         self.state_normalizer, self.action_normalizer, self.env_normalizer = (
             self.train_dataset.dataset.get_normalizer()
+        )
+        self.model.set_normalizer(
+            self.state_normalizer, self.action_normalizer, self.env_normalizer
         )
 
     def setup_scheduler(self):
@@ -66,19 +69,21 @@ class DiffPolicy:
         )
         self.model.set_scheduler(scheduler=self.noise_scheduler)
 
-    def __call__(self, states, actions):
+    def __call__(self, states, action):
         config = self.config
         model = self.model
         device = self.device
         horizon = self.horizon
-        desired_pos_init = torch.from_numpy(actions[:2]).to(device)
+        desired_pos_init = torch.from_numpy(action[0, :2]).to(device)
         desired_pos_full = torch.ones((1, horizon, 2)).to(device)
-        desired_pos_full[:, 0, :] = desired_pos_init
+        desired_pos_full[0, 0, :] = desired_pos_init
         states = {
             "desired_pos": desired_pos_full,
             "current_pos": desired_pos_full,
         }
-        actions = {"vel": torch.zeros((1, horizon, 2), device=device)}
+        # actions = {"vel": torch.zeros((1, horizon, 2), device=device)}
+        act_torch = torch.from_numpy(action).unsqueeze(0).to(device)
+        actions = {"vel": act_torch}
         environment = {
             "goal": torch.ones((1, 2), device=device),
         }

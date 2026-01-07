@@ -65,6 +65,7 @@ class ConstraintAnalyzer(nn.Module):
         constraints = self.constraints
         energy = []
         residuals = []
+        states = self.state_normalizer.unnormalize(states)
         for key in self.constraints.keys():
             if key == "states":
                 # TODO: constraint should have a states names that are needed
