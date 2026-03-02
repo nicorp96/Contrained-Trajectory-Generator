@@ -1,0 +1,12 @@
+diffusers==0.35.2
+einops==0.8.2
+h5py==3.15.1
+mani_skill_nightly==2026.1.31.920
+matplotlib==3.10.8
+numpy==2.4.2
+PyYAML==6.0.3
+scipy==1.17.1
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+tqdm==4.67.1
+transformers==4.57.1
