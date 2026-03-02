@@ -2,9 +2,7 @@ import torch
 import yaml
 from typing import Dict
 
-
 AXIS_ID_TO_XYZ = ["x", "y", "z"]
-
 
 def load_config(config_path):
     try:
@@ -15,14 +13,33 @@ def load_config(config_path):
         raise RuntimeError(f"Failed to load config from {config_path}: {e}")
 
 
-def safe_norm(x, dim=-1, eps=1e-8):
-    return torch.sqrt(torch.clamp((x * x).sum(dim=dim), min=eps))
+def split_state_tensor(
+    state_tensor: torch.Tensor, param_shapes: dict, ignore_keys: list = [""]
+) -> dict:
+    split_dict = {}
+    start = 0
+    for name, value in param_shapes.items():
+        if name not in ignore_keys:
+            end = start + value["shape"]
+            split_dict[name] = state_tensor[:, :, start:end]  # .detach().cpu()
+            start = end
+    return split_dict
 
 
-def set_torch_dict_to(dict: Dict[str, torch.Tensor], device: torch.device):
-    for key in dict:
-        dict[key] = dict[key].to(device)
-    return dict
+def extract_into_shape(
+    x_1d: torch.Tensor, timesteps: torch.Tensor, target: torch.Tensor
+):
+    """
+    x_1d: [T]
+    timesteps: [B] int64
+    target: tensor with batch dim first, e.g. [B, ...]
+    returns: [B, 1, 1, ...] broadcastable to target
+    """
+    b = timesteps.shape[0]
+    out = x_1d.gather(0, timesteps)  # [B]
+    # reshape to [B, 1, 1, ...] to broadcast across target dims
+    return out.view(b, *([1] * (target.ndim - 1)))
+
 
 
 def dict_to_tensor_concat(
@@ -33,3 +50,13 @@ def dict_to_tensor_concat(
         dim=dim,
     ).to(device)
     return tensor_concat
+
+
+def split_state_tensor(state_tensor: torch.Tensor, param_shapes: dict) -> dict:
+    split_dict = {}
+    start = 0
+    for name in param_shapes.keys():
+        end = start + param_shapes[name]["shape"]
+        split_dict[name] = state_tensor[:, :, start:end].detach().cpu()
+        start = end
+    return split_dict

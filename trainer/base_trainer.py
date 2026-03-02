@@ -15,8 +15,9 @@ import yaml
 
 from dataset.utils import get_ds_from_cfg
 from models.utils.ema import EMA
+from global_parameters import ConfigGlobalP
 
-torch.autograd.set_detect_anomaly(True)
+cfg_global_p = ConfigGlobalP()
 
 
 class TqdmLoggingHandler(logging.Handler):
@@ -48,7 +49,7 @@ class BaseTrainer:
         if self.from_checkpoint:
             self.load_checkpoint()
         log_dir = os.path.join(
-            os.getcwd(),
+            cfg_global_p.LOGS_DIR,
             self.config["training"]["log_dir"],
             self.config["name"],
             self.current_run_dir,
@@ -69,7 +70,7 @@ class BaseTrainer:
 
     def load_checkpoint(self):
         checkpoint_path = os.path.join(
-            os.getcwd(),
+            cfg_global_p.LOGS_DIR,
             self.config["training"]["checkpoint_path"],
             self.config["training"]["ckpt_name"],
         )
@@ -86,6 +87,7 @@ class BaseTrainer:
     def setup_logging(self):
         # Set up logging to both console and file
         log_dir = os.path.join(
+            cfg_global_p.LOGS_DIR,
             self.config["training"]["output_dir"],
             self.config["name"],
             self.current_run_dir,
@@ -304,8 +306,7 @@ class BaseTrainer:
                     if self.config["training"]["plotting"]:
                         # Plotting the output and target trajectories
                         self.plotting(
-                            out_dict["output"],
-                            out_dict["target"],
+                            out_dict,
                             batch_idx,
                             self.epoch,
                         )
@@ -318,23 +319,39 @@ class BaseTrainer:
         self.model.train()
         return val_loss / len(self.val_loader)
 
-    def compute_state_metrics(self, preds, targets):
+    def compute_state_metrics(self, preds, targets, ignore_keys=[""]):
         """Compute per-variable metrics."""
         metrics = {}
-        state_slices = self.config["dataset"]["state_shapes"]
-        for name, sl in state_slices.items():
-            pred_slice = preds[:, sl]
-            target_slice = targets[:, sl]
-            mse = torch.mean((pred_slice - target_slice) ** 2).item()
-            mae = torch.mean(torch.abs(pred_slice - target_slice)).item()
-            metrics[f"{name}_mse"] = mse
-            metrics[f"{name}_mae"] = mae
+        param_shapes = self.config["dataset"]["state_shapes"]
+        start = 0
+        for name in param_shapes.keys():
+            if name not in ignore_keys:
+                end = start + param_shapes[name]["shape"]
+                pred_slice = preds[:, :, start:end]
+                target_slice = targets[:, :, start:end]
+                for axis_idx in range(pred_slice.shape[-1]):
+                    mse_i = torch.mean(
+                        (pred_slice[:, :, axis_idx] - target_slice[:, :, axis_idx]) ** 2
+                    ).item()
+                    mae_i = torch.mean(
+                        torch.abs(
+                            pred_slice[:, :, axis_idx] - target_slice[:, :, axis_idx]
+                        )
+                    ).item()
+                    metrics[f"{name}_ax_{axis_idx}_mse"] = mse_i
+                    metrics[f"{name}_ax_{axis_idx}_mae"] = mae_i
+                    mse = torch.mean((pred_slice - target_slice) ** 2).item()
+                    mae = torch.mean(torch.abs(pred_slice - target_slice)).item()
+                    metrics[f"{name}_mse"] = mse
+                    metrics[f"{name}_mae"] = mae
+                start = end
         return metrics
 
     def save_checkpoint(self):
         epoch_step = self.epoch
         global_step = self.global_step
         checkpoint_path = os.path.join(
+            cfg_global_p.LOGS_DIR,
             self.config["training"]["output_dir"],
             self.config["name"],
             self.current_run_dir,
@@ -346,6 +363,7 @@ class BaseTrainer:
             "global_step": global_step,
             "epoch": epoch_step,
         }
+
         if not os.path.exists(checkpoint_path):
             os.makedirs(checkpoint_path)
 

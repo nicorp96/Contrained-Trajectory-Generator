@@ -1,15 +1,14 @@
 from dataclasses import dataclass
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from einops import repeat, rearrange
+from einops import repeat
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Dict, Optional
 
 
 from common.utils import dict_to_tensor_concat
+from common.inpainting import apply_inpainting
 from common.get_class import get_class_dict
-from models.utils.diffusion import apply_inpainting
 from models.utils.normalizer import DictNormalizer
 
 from models.utils.constraints import ObstacleConstraint
