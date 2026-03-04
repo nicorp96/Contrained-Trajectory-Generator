@@ -5,7 +5,7 @@ import multiprocessing as mp
 import numpy as np
 import h5py
 import torch
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoImageProcessor, AutoModel, DetrImageProcessorFast
 
 # Example names:
 #   "voltron:r3m"
@@ -237,7 +237,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         name,
         method="tanh_standard",
         eps=1e-8,
-        encoder_name="facebook/dinov2-base",  # good default if you want strong generic features
+        encoder_name="facebook/detr-resnet-50",  # good default if you want strong generic features
         pool="cls",  # "cls" or "mean"
         freeze_encoder=True,
         flatten_time=True,
@@ -248,7 +248,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         self.freeze_encoder = freeze_encoder
         self.flatten_time = flatten_time
 
-        self.processor = AutoImageProcessor.from_pretrained(encoder_name, use_fast=True)
+        self.processor = DetrImageProcessorFast.from_pretrained(encoder_name, use_fast=True)
         self.encoder = AutoModel.from_pretrained(encoder_name)
         self.encoder.eval()
 
@@ -318,7 +318,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         x_bchw = x_bchw.to(dev)
 
         # HF processors can accept torch tensors directly as "images"
-        inputs = self.processor(images=x_bchw, return_tensors="pt")
+        inputs = self.processor(images=x_bchw, return_tensors="pt", device=dev)
         inputs = {k: v.to(dev) for k, v in inputs.items()}
 
         out = self.encoder(**inputs)
