@@ -70,6 +70,8 @@ class DiffusionTrainer(BaseTrainer):
         self.normalizers.append(state_normalizer)
         self.normalizers.append(goal_normalizer)
         self.normalizers.append(obs_normalizer)
+        for normalizer in self.normalizers:
+            normalizer.set_device(self.device)
 
     def compute_loss(self, output, target, mask_valid=None):
         # output, target: [B, M, D]
@@ -520,7 +522,7 @@ class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
         # target_unnormalized = self.normalizer_state.unnormalize(target)
         for key in output_dict.keys():
             output_np = output_unnormalized[key].detach().cpu().numpy()
-            target_np = target[key].detach().cpu().numpy()  # [:, 1:, :]
+            target_np = target[key].detach().cpu().numpy()
             batch_id = np.random.randint(0, output_np.shape[0])
             seq_orig = output_np.shape[1]
             seq_len_L_i = seq_orig  # seq_len_L[batch_id]

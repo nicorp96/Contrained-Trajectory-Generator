@@ -87,6 +87,12 @@ class BaseNormalizer(nn.Module):
     def log_stats(self, writer: SummaryWriter, tag: str, global_step: int = 0):
         pass
 
+    def set_device(self, device):
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
+        self.min = self.min.to(device)
+        self.max = self.max.to(device)
+
 
 class Normalizer(BaseNormalizer):
     def __init__(self, size, name, method="standard", eps=1e-8):
@@ -114,6 +120,7 @@ class Normalizer(BaseNormalizer):
         self.max = torch.tensor(dict["max"])
         self.fitted = True
 
+    @torch.no_grad()
     def forward(self, x, **kwargs):
         if not self.fitted:
             raise RuntimeError("Normalizer not fitted yet.")
@@ -149,6 +156,7 @@ class Normalizer(BaseNormalizer):
             return x
         return None
 
+    @torch.no_grad()
     def unnormalize(self, x):
         if self.method == "standard":
             if self.mean.ndim == 1:
@@ -241,7 +249,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         self.flatten_time = flatten_time
 
         self.processor = AutoImageProcessor.from_pretrained(encoder_name, use_fast=True)
-        self.encoder = AutoModel.from_pretrained(encoder_name).to("cuda:0")
+        self.encoder = AutoModel.from_pretrained(encoder_name)
         self.encoder.eval()
 
         if freeze_encoder:
@@ -260,7 +268,11 @@ class ImageNormalizerEncoder(BaseNormalizer):
         self.fitted = True
 
         # for "layernorm_tanh"
-        self._ln = nn.LayerNorm(self.size).to("cuda:0")
+        self._ln = nn.LayerNorm(self.size)
+
+    def set_device(self, device):
+        self._ln = self._ln.to(device)
+        self.encoder = self.encoder.to(device)
 
     def _to_bchw_float(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -296,7 +308,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
 
         return x
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _encode_bchw(self, x_bchw: torch.Tensor) -> torch.Tensor:
         """
         x_bchw: [B,3,H,W] float
@@ -336,10 +348,11 @@ class ImageNormalizerEncoder(BaseNormalizer):
 
     def set_stats_from_dict(self, dct):
         dev = next(self.encoder.parameters()).device
-        self.feat_mean = torch.tensor(dct["mean"], device=dev, dtype=torch.float32)
-        self.feat_std = torch.tensor(dct["std"], device=dev, dtype=torch.float32)
+        self.feat_mean = torch.tensor(dct["mean"], device=dev, dtype=torch.float16)
+        self.feat_std = torch.tensor(dct["std"], device=dev, dtype=torch.float16)
         self.fitted = True
 
+    @torch.no_grad()
     def forward(self, x, **kwargs):
         B, L, C, H, W = x.shape
         x = self._to_bchw_float(x)
@@ -365,6 +378,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
 
         raise ValueError(f"Unsupported method={self.method}")
 
+    @torch.no_grad()
     def unnormalize(self, x):
         # Only meaningful for reversing standardization (not pixels).
         if self.method == "standard":
@@ -446,6 +460,10 @@ class DictNormalizer(nn.Module):
         for key in stats_dict:
             if key in self.normalizers.keys():
                 self.normalizers[key].set_stats_from_dict(stats_dict[key])
+
+    def set_device(self, device):
+        for key in self.normalizers.keys():
+            self.normalizers[key].set_device(device)
 
     def forward(self, x: dict, **kwargs):
         return {

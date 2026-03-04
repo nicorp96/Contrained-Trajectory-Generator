@@ -1,7 +1,7 @@
 name: "diffusion_trj_padding"
 target: trainer.trainer_diffusion_traj.DiffusionTrajectoryPadHistTrainer
 inpainting: True
-start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10]
+start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10, 11, 12, 13, 14, 15]
 
 model:
   target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
@@ -42,8 +42,10 @@ training:
   log_dir: "runs/training"
   log_eval_dir: "runs/inference"
   output_dir: "logs"
-  val_every: 2
-  save_every: 2
+  val_every: 100
+  save_every: 100
+  mixed_precision: "bf16"  # | "fp16" | "bf16"
+  gradient_accumulation_steps: 1
   checkpoint_path: "logs"
   device: "cuda:0"
   plotting: true

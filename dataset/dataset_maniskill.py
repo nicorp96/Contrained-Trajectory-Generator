@@ -99,11 +99,8 @@ class TrajectoryKDatasetHDF5(BaseDataset):
         #     resampling_states = (
         #         list("position") + resampling_states
         #     )  # list(self.obs_shapes.keys())
-
         for k in resampling_states:
             if k in self.state_shapes:
-                # if "delta_pos" in k:
-                #     continue
                 d = int(self.state_shapes[k]["shape"])
             elif k in self.obs_shapes:
                 d = int(self.obs_shapes[k]["shape"])

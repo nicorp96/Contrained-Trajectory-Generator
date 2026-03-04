@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Literal, Any
 from scipy.interpolate import CubicSpline, interp1d, PchipInterpolator
 
-
 # __all__ = [
 #     "compute_time_phase",
 #     "time_phase_resample",
@@ -636,14 +635,8 @@ class TimeGrid(ResamplingBase):
     def __init__(self, config):
         super().__init__(config)
         # physics options
-        self.mass_flow_is_fuel_burn_positive = bool(
-            config.get("mass_flow_is_fuel_burn_positive", True)
-        )
-        self.derive_rho_from_altitude = bool(
-            config.get("derive_rho_from_altitude", True)
-        )
-        self.enforce_mass_mdot_consistency = bool(
-            config.get("enforce_mass_mdot_consistency", True)
+        self.enforce_tcp_vel_consistency = bool(
+            config.get("enforce_tcp_vel_consistency", True)
         )
 
     def resample(
