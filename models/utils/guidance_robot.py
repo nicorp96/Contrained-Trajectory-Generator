@@ -264,8 +264,8 @@ class CFGGuidanceKSampling(BaseGuidance):
         super().__init__(config)
         self.grad_guid = False  # config.get("grad_guid", True)
         self.eta = config["guidance_eta"]
-        self.s_max = config.get("s_max", 1644.0)
-        self.s_min = config.get("s_min", 1.0)
+        # self.s_max = config.get("s_max", 1644.0)
+        # self.s_min = config.get("s_min", 1.0)
 
     def __call__(
         self,
@@ -293,7 +293,6 @@ class CFGGuidanceKSampling(BaseGuidance):
         if k_in.ndim > 0:
             assert k_in.shape[0] == input_noised.shape[0]
             k_in = torch.cat([k_in, k_in], dim=0)
-        kwargs["dist"] = torch.cat([kwargs["dist"], kwargs["dist"]], dim=0)
         model_out = model(traj_in, k_in, cond_in, **kwargs)
         out_uncond, out_cond = model_out.chunk(2, dim=0)
         pred_type = scheduler.config.prediction_type
@@ -315,15 +314,15 @@ class CFGGuidanceKSampling(BaseGuidance):
             x_prev = torch.stack(x_prev, dim=0)
         else:
             x_prev = scheduler.step(guided, k, input_noised).prev_sample
-        if grad_guid:
-            alpha_bar = scheduler.alphas_cumprod[k.long()]
-            sigma_t = torch.sqrt(1.0 - alpha_bar).to(input_noised.device)
-            sigma_t = repeat(sigma_t, "B -> B H", H=input_noised.shape[-1]).unsqueeze(1)
-            grad_E = compute_grad_speed_mag(
-                input_noised,
-                s_max=self.s_max,
-                s_min=self.s_min,
-                **kwargs,
-            )
-            x_prev = x_prev - sigma_t * eta * grad_E
+        # if grad_guid:
+        #     alpha_bar = scheduler.alphas_cumprod[k.long()]
+        #     sigma_t = torch.sqrt(1.0 - alpha_bar).to(input_noised.device)
+        #     sigma_t = repeat(sigma_t, "B -> B H", H=input_noised.shape[-1]).unsqueeze(1)
+        # grad_E = compute_grad_speed_mag(
+        #     input_noised,
+        #     s_max=self.s_max,
+        #     s_min=self.s_min,
+        #     **kwargs,
+        # )
+        # x_prev = x_prev - sigma_t * eta * grad_E
         return x_prev

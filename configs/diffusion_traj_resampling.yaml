@@ -1,0 +1,115 @@
+name: "diffusion_trj_resampling"
+target: trainer.trainer_diffusion_traj.DiffusionTrajectoryPadHistRSTrainer
+inpainting: True
+start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10, 11, 12, 13, 14, 15]
+goal_indices: [9, 10, 11] # tcp position of the goal
+
+model:
+  target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
+  input_dim: 16        # pos: 3, vel: 3
+  cond_dim: 7         # start - pip: 3, goal angle: 2 (sin, cos) , current_angles: 6 : 3*2, stat_vel: 3
+  diffusion_t_embed_dim: 128
+  d_model: 128
+  n_heads: 4
+  n_blocks: 4
+  dropout: 0.1
+  history: True
+  history_shape: 1552
+  time_encoder: False
+  time_t_embed_dim: 128
+  num_inference_steps: 25
+  guidance_scale: 1.5
+  cfg_drop_prob: 0.1
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 1000
+    beta_start: 0.00001
+    beta_end: 0.0085
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon # or sample or v_prediction
+  guidance:
+    target: models.utils.guidance_robot.CFGGuidanceKSampling
+    guidance_eta: 0.0005
+    guidance_scale: 1.5
+    grad_guid: True
+
+
+training:
+  batch_size: 64
+  learning_rate: 0.0001
+  num_epochs: 10001
+  use_ema: True
+  optimizer: "adam"
+  log_dir: "runs/training"
+  log_eval_dir: "runs/inference"
+  output_dir: "logs"
+  val_every: 100
+  save_every: 500
+  mixed_precision: "bf16"  # | "fp16" | "bf16"
+  gradient_accumulation_steps: 1
+  checkpoint_path: "logs"
+  device: "cuda:0"
+  plotting: true
+  tqdm_interval_sec: 1.0
+  from_ckp: false
+  ckpt_name: "20250704-102246/checkpoint_5.pth"
+  scheduler:
+    name: cosine              # Options: linear, cosine, step, constant, etc.
+    num_warmup_steps: 5000     # Optional, required for warmup-based schedulers
+
+ema:
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataset:
+  target: dataset.dataset_maniskill.TrajectoryKDatasetHDF5
+  path: "mani_skill_data/demos/PegInsertionSide-ExtendedTIME/motionplanning/trajectory.h5"
+  val: true
+  split: true
+  path_stats: "mani_skill_data/demos/PegInsertionSide-ExtendedTIME/motionplanning/stats.json"
+  val_ratio: 0.2
+  expand_goal: 0
+  sequence_len: 430
+  sequence_hist: 8
+  resampling_algo:
+    target: common.resampling_algo.TimeGrid
+    interp_kind: "linear"
+    extrapolate_edge: True
+    K: 430
+    eps: 0.0000001
+
+  state_shapes:
+    qpos:
+      shape: 9
+      method_norm: "minmax"
+    tcp_pose:
+      shape: 7
+      method_norm: "minmax"
+
+  goal_shapes:
+    tcp_pose:
+      shape: 7
+      method_norm: "minmax"
+      # camera?
+
+  obs_shapes:
+    qpos:
+      shape: 9
+      method_norm: "minmax"
+    tcp_pose:
+      shape: 7
+      method_norm: "minmax"
+    base_camera:
+      shape: (3, 128, 128)
+      type: "rgb"
+      method_norm: "layernorm_tanh"
+    hand_camera:
+      shape: (3, 128, 128)
+      type: "rgb"
+      method_norm: "layernorm_tanh"
