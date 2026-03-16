@@ -21,7 +21,7 @@ model:
   guidance_scale: 1.5
   cfg_drop_prob: 0.1
   noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    target: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 1000
     beta_start: 0.00001
     beta_end: 0.0085

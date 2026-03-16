@@ -574,7 +574,10 @@ class BaseTrainer:
         split_dict = {}
         start = 0
         for name in param_shapes.keys():
-            end = start + param_shapes[name]["shape"]
+            slc = param_shapes[name]["shape"]
+            if name == "qpos":
+                slc = param_shapes[name]["shape"] * 2
+            end = start + slc
             split_dict[name] = state_tensor[:, :, start:end].detach().cpu()
             start = end
         return split_dict

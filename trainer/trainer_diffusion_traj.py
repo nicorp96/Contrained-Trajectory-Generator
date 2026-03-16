@@ -58,7 +58,7 @@ class DiffusionTrainer(BaseTrainer):
     def setup_normalizer(self):
         if "path_stats" in self.config["dataset"]:
             state_normalizer, goal_normalizer, obs_normalizer = (
-                self.train_dataset.dataset.get_stats_from_file()
+                self.train_dataset.dataset.get_normalizers_from_file()
             )
         else:
             state_normalizer, goal_normalizer, obs_normalizer = (
@@ -1050,7 +1050,7 @@ class DiffusionTrajectoryChunk(DiffusionTrajectoryPadHistTrainer):
     def setup_normalizer(self):
         if "path_stats" in self.config["dataset"]:
             state_normalizer, goal_normalizer, normalizer_obs = (
-                self.train_dataset.base.get_stats_from_file()
+                self.train_dataset.base.get_normalizers_from_file()
             )
         else:
             state_normalizer, goal_normalizer = (

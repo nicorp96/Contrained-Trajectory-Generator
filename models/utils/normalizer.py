@@ -88,10 +88,12 @@ class BaseNormalizer(nn.Module):
         pass
 
     def set_device(self, device):
-        self.mean = self.mean.to(device)
-        self.std = self.std.to(device)
-        self.min = self.min.to(device)
-        self.max = self.max.to(device)
+        if self.method == "standard":
+            self.mean = self.mean.to(device=device)
+            self.std = self.std.to(device=device)
+        elif self.method == "minmax":
+            self.min = self.min.to(device=device)
+            self.max = self.max.to(device=device)
 
 
 class Normalizer(BaseNormalizer):
@@ -203,18 +205,21 @@ class AnglesSinCos(BaseNormalizer):
         super().__init__(size, name, method, eps)
 
     def forward(self, x, **kwargs):
-        """x: [B, dim]"""
         if x.shape[-1] != self.size:
             raise ValueError(
                 f"Input tensor must have last dimension of size {self.size}."
             )
-        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        sin = torch.sin(x)
+        cos = torch.cos(x)
+        return torch.stack((sin, cos), dim=-1).reshape(*x.shape[:-1], 2 * self.size)
 
     def fit(self, x):
         pass
 
     def unnormalize(self, x):
-        return x
+        sin = x[..., 0::2]
+        cos = x[..., 1::2]
+        return torch.atan2(sin, cos)
 
     def log_stats(self, writer: SummaryWriter, tag: str, global_step: int = 0):
         pass
@@ -248,7 +253,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         self.freeze_encoder = freeze_encoder
         self.flatten_time = flatten_time
 
-        self.processor = DetrImageProcessorFast.from_pretrained(encoder_name, use_fast=True)
+        self.processor = AutoImageProcessor.from_pretrained(encoder_name, use_fast=True)
         self.encoder = AutoModel.from_pretrained(encoder_name)
         self.encoder.eval()
 
@@ -271,6 +276,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
         self._ln = nn.LayerNorm(self.size)
 
     def set_device(self, device):
+        super().set_device(device)
         self._ln = self._ln.to(device)
         self.encoder = self.encoder.to(device)
 
@@ -289,7 +295,7 @@ class ImageNormalizerEncoder(BaseNormalizer):
                 x = x.reshape(B * T, *x.shape[2:])
             else:
                 raise ValueError(
-                    "flatten_time=False not supported in this simple version."
+                    "flatten_time=False not sup ported in this simple version."
                 )
 
         if x.ndim != 4:
@@ -406,7 +412,8 @@ class DictNormalizer(nn.Module):
                     flatten_time=value.get("flatten_time", True),
                 )
 
-            elif "deg" in name or "rad" in name:
+            # elif "qpos" in name:
+            elif "angle" in name:
                 # Use AnglesSinCos for angle representations
                 self.normalizers[name] = AnglesSinCos(
                     size=value["shape"],

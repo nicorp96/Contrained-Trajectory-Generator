@@ -1,7 +1,7 @@
 name: "diffusion_trj_padding"
 target: trainer.trainer_diffusion_traj.DiffusionTrajectoryPadHistTrainer
 inpainting: True
-start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10, 11, 12, 13, 14, 15]
+start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7] #, 8 ,9, 10, 11, 12, 13, 14, 15]
 
 model:
   target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
@@ -13,7 +13,7 @@ model:
   n_blocks: 3
   dropout: 0.1
   history: True
-  history_shape: 1553
+  history_shape: 785
   time_encoder: False
   time_t_embed_dim: 128
   num_inference_steps: 25
@@ -98,8 +98,9 @@ dataset:
       shape: (3, 128, 128)
       type: "rgb"
       method_norm: "layernorm_tanh"
-
+      encoder_name: "facebook/dinov2-small"
     hand_camera:
       shape: (3, 128, 128)
       type: "rgb"
       method_norm: "layernorm_tanh"
+      encoder_name: "facebook/dinov2-small"
