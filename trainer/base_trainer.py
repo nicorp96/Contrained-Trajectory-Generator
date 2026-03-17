@@ -121,6 +121,12 @@ class BaseTrainer:
         """Must return dict with keys: loss, output, target (at minimum)."""
         raise NotImplementedError("val_step() must be implemented in subclasses")
 
+    def set_train_mode(self):
+        self.model.train()
+
+    def set_eval_mode(self):
+        self.model.eval()
+
     # -------------------------
     # Setup helpers
     # -------------------------
@@ -342,7 +348,7 @@ class BaseTrainer:
     # Training / Validation
     # -------------------------
     def train(self):
-        self.model.train()
+        self.set_train_mode()
 
         func_train_step = (
             self.train_step_with_sampling
@@ -445,7 +451,7 @@ class BaseTrainer:
             self.writer.close()
 
     def validate(self):
-        self.model.eval()
+        self.set_eval_mode()
 
         tqdm_interval = float(self.config["training"].get("tqdm_interval_sec", 0.5))
         pbar = tqdm.tqdm(

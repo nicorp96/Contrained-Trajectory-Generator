@@ -5,6 +5,8 @@ import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from einops import repeat
 import os
+import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
@@ -14,6 +16,7 @@ from dataset.utils import get_ds_from_cfg
 from global_parameters import ConfigGlobalP
 from models.utils.ema import EMA
 from models.utils.guidance_robot import BaseGuidance, CFGGuidance
+from models.utils.encoders_robot import ResNet18Encoder, HFVisionEncoder
 from trainer.base_trainer import BaseTrainer
 
 cfg_gp = ConfigGlobalP()
@@ -26,6 +29,79 @@ class DiffusionTrainer(BaseTrainer):
         self.goal_indices = config.get("goal_indices", None)
         self.start_indices = config.get("start_indices", None)
         self.inpainting = config.get("inpainting", True)
+        self.image_encoder_dict = self.load_image_encoder(
+            config["model"], self.accelerator.device
+        )
+
+    @staticmethod
+    def load_image_encoder(config, device):
+        encoder_cfg = config.get("image_encoders", {})
+        encoder_dict = nn.ModuleDict()
+
+        for key, cfg in encoder_cfg.items():
+            enc_type = cfg["type"].lower()
+            trainable = cfg.get("trainable", False)
+
+            if enc_type == "resnet18":
+                encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
+
+            elif enc_type in {"dinov2", "hf", "transformer"}:
+                encoder = HFVisionEncoder(
+                    model_name=cfg["name"],
+                    pool=cfg.get("pool", "cls"),
+                )
+
+            elif enc_type == "none":
+                encoder = nn.Identity()
+                encoder.output_dim = config["dataset"]["state_shapes"][key]["shape"][0]
+
+            else:
+                raise ValueError(f"Unsupported image encoder type: {enc_type}")
+            encoder = encoder.to(device=device)
+            if enc_type != "none":
+                for p in encoder.parameters():
+                    p.requires_grad_(trainable)
+
+                if trainable:
+                    encoder.train()
+                else:
+                    encoder.eval()
+
+            encoder_dict[key] = encoder
+        return encoder_dict
+
+    def setup_optimizer(self):
+        training_config = self.config["training"]
+        optimizer_type = training_config["optimizer"]
+        learning_rate = training_config["learning_rate"]
+        encoder_lr = training_config.get("image_encoder_lr", learning_rate)
+
+        # model params
+        model_params = [p for p in self.model.parameters() if p.requires_grad]
+
+        # encoder params (only trainable ones)
+        encoder_params = []
+        if hasattr(self, "image_encoder_dict"):
+            for enc in self.image_encoder_dict.values():
+                encoder_params.extend([p for p in enc.parameters() if p.requires_grad])
+
+        param_groups = []
+
+        if model_params:
+            param_groups.append({"params": model_params, "lr": learning_rate})
+
+        if encoder_params:
+            param_groups.append({"params": encoder_params, "lr": encoder_lr})
+
+        # build optimizer
+        if optimizer_type.lower() == "adam":
+            self.optimizer = optim.Adam(param_groups)
+        elif optimizer_type.lower() == "sgd":
+            self.optimizer = optim.SGD(param_groups)
+        elif optimizer_type.lower() == "adamw":
+            self.optimizer = optim.AdamW(param_groups)
+        else:
+            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
 
     def setup_model(self):
         self.model = get_class_dict(self.config["model"])
@@ -72,6 +148,76 @@ class DiffusionTrainer(BaseTrainer):
         self.normalizers.append(obs_normalizer)
         for normalizer in self.normalizers:
             normalizer.set_device(self.device)
+
+    def encode_image_observations(self, obs_dict):
+        encoded = {}
+
+        for key, value in obs_dict.items():
+            if key in self.image_encoder_dict:
+                encoder = self.image_encoder_dict[key]
+
+                # value expected [B, L, C, H, W]
+                B, L, C, H, W = value.shape
+                x = value.reshape(B * L, C, H, W)
+
+                feat = encoder(x)
+
+                if feat.ndim == 4:
+                    feat = feat.flatten(1)
+
+                feat = feat.reshape(B, L, -1)
+                encoded[key] = feat
+            else:
+                encoded[key] = value
+
+        return encoded
+
+    def set_train_mode(self):
+        self.model.train()
+        for key, enc in self.image_encoder_dict.items():
+            trainable = self.config["model"]["image_encoders"][key].get(
+                "trainable", False
+            )
+            if trainable:
+                enc.train()
+            else:
+                enc.eval()
+
+    def set_eval_mode(self):
+        self.model.eval()
+        for key, enc in self.image_encoder_dict.items():
+            enc.eval()
+
+    def save_checkpoint(self):
+        # sync before saving
+        self.accelerator.wait_for_everyone()
+
+        payload = {
+            "config": self.config,
+            "state_dicts": {
+                "model_state": self.accelerator.unwrap_model(self.model).state_dict(),
+                "optimizer_state": self.optimizer.state_dict(),
+                "ema_state": (
+                    self.ema.model.state_dict() if self.ema is not None else None
+                ),
+                "image_encoders_state": self.image_encoder_dict.state_dict(),
+                "normalizer": {
+                    "normalizer_state": self.normalizer_state.state_dict(),
+                    "normalizer_goal": self.normalizer_goal.state_dict(),
+                    "normalizer_obs": self.normalizer_obs.state_dict(),
+                },
+            },
+            "global_step": int(self.global_step),
+            "epoch": int(self.epoch),
+        }
+
+        path = self._checkpoint_path()
+        # accelerator.save is safe in distributed; still only write once
+        if self.accelerator.is_main_process:
+            self.accelerator.save(payload, path)
+            self.logger.info(f"Saved checkpoint: {path}")
+
+        self.accelerator.wait_for_everyone()
 
     def compute_loss(self, output, target, mask_valid=None):
         # output, target: [B, M, D]
@@ -377,10 +523,12 @@ class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
         mask_valid = None
         mask_key_att = None  # ~mask_valid
         history_dict_nm = self.normalizer_obs(extra)
+        history_dict_nm = self.encode_image_observations(history_dict_nm)
         trajectory_history = torch.cat(
             [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
             dim=2,
         )
+
         goal_l = []
         for value in goals_norm.values():
             vlu = value
@@ -456,6 +604,7 @@ class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
 
         mask_valid = None
         history_dict_nm = self.normalizer_obs(extra)
+        history_dict_nm = self.encode_image_observations(history_dict_nm)
         trajectory_history = torch.cat(
             [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
             dim=2,

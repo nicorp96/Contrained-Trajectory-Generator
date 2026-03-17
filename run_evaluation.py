@@ -47,10 +47,14 @@ def main(args):
         )
         env = get_environment(policy.config.get("env_id", "PegInsertionSide-v1"))
         obs, info = env.reset()
+        init_action = obs["agent"]["qpos"][:, : env.action_space.shape[0]]
+        init_action[:, -1] = 1.0
+        obs.update({"actions": init_action})
         while not info["success"]:
             actions = policy(obs)
             for step in range(policy.action_horizon):
                 obs, rew, terminated, truncated, info = env.step(actions[:, step, :])
+                obs.update({"actions": actions[:, step, :]})
                 env.render_human()
             # if terminated or truncated:
             #     obs, info = env.reset()

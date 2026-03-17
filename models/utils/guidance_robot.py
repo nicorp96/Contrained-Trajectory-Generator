@@ -1,5 +1,4 @@
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from einops import repeat
 import torch
 import torch.nn.functional as F
 from typing import Optional

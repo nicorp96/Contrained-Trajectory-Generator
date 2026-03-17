@@ -62,15 +62,11 @@ class BaseNormalizer(nn.Module):
         self.name = name
         self.start = None
         self.goal = None
-        self.register_buffer("mean", torch.zeros(size))
-        self.register_buffer("std", torch.ones(size))
-        self.register_buffer("min", torch.zeros(size))
-        self.register_buffer("max", torch.ones(size))
         self.fitted = False
-        self.mean = None
-        self.std = None
-        self.min = None
-        self.max = None
+        # self.mean = None
+        # self.std = None
+        # self.min = None
+        # self.max = None
 
     def fit(self, data_list):
         pass
@@ -99,6 +95,10 @@ class BaseNormalizer(nn.Module):
 class Normalizer(BaseNormalizer):
     def __init__(self, size, name, method="standard", eps=1e-8):
         super().__init__(size, name, method, eps)
+        self.register_buffer("mean", torch.zeros(size, dtype=torch.float32))
+        self.register_buffer("std", torch.ones(size, dtype=torch.float32))
+        self.register_buffer("min", torch.zeros(size, dtype=torch.float32))
+        self.register_buffer("max", torch.ones(size, dtype=torch.float32))
 
     def fit(self, data_list):
         """data_list: List of tensors to compute statistics over."""
@@ -116,10 +116,10 @@ class Normalizer(BaseNormalizer):
         self.fitted = True
 
     def set_stats_from_dict(self, dict):
-        self.mean = torch.tensor(dict["mean"])
-        self.std = torch.tensor(dict["std"])
-        self.min = torch.tensor(dict["min"])
-        self.max = torch.tensor(dict["max"])
+        self.mean.copy_(torch.tensor(dict["mean"]))
+        self.std.copy_(torch.tensor(dict["std"]))
+        self.min.copy_(torch.tensor(dict["min"]))
+        self.max.copy_(torch.tensor(dict["max"]))
         self.fitted = True
 
     @torch.no_grad()
@@ -134,8 +134,8 @@ class Normalizer(BaseNormalizer):
                 return x_temp
             return (x - self.mean) / (self.std + self.eps)
         elif self.method == "minmax":
-            self.max = self.max.to(x.device)
-            self.min = self.min.to(x.device)
+            # self.max = self.max.to(x.device)
+            # self.min = self.min.to(x.device)
             return 2 * (x - self.min) / (self.max - self.min + self.eps) - 1
         elif self.method == "path_len":
             seg_len = np.linalg.norm(np.diff(x, axis=0), axis=1)
@@ -203,6 +203,10 @@ class Normalizer(BaseNormalizer):
 class AnglesSinCos(BaseNormalizer):
     def __init__(self, size, name, method="sincos", eps=1e-8):
         super().__init__(size, name, method, eps)
+        self.register_buffer("mean", torch.zeros(size, dtype=torch.float32))
+        self.register_buffer("std", torch.ones(size, dtype=torch.float32))
+        self.register_buffer("min", torch.zeros(size, dtype=torch.float32))
+        self.register_buffer("max", torch.ones(size, dtype=torch.float32))
 
     def forward(self, x, **kwargs):
         if x.shape[-1] != self.size:
@@ -225,174 +229,224 @@ class AnglesSinCos(BaseNormalizer):
         pass
 
 
-class ImageNormalizerEncoder(BaseNormalizer):
-    """
-    HF-native vision encoder + feature normalization.
+# class ImageNormalizerEncoder(BaseNormalizer):
+#     """
+#     HF-native vision encoder + feature normalization.
+#
+#     method:
+#       - "none": return raw features
+#       - "standard": (feat-mean)/std
+#       - "tanh_standard": tanh((feat-mean)/std)  -> bounded (-1, 1), no min/max
+#       - "layernorm_tanh": tanh(LayerNorm(feat)) -> no fitting, bounded (-1, 1)
+#     """
+#
+#     def __init__(
+#         self,
+#         size,
+#         name,
+#         method="tanh_standard",
+#         eps=1e-8,
+#         encoder_name="facebook/detr-resnet-50",  # good default if you want strong generic features
+#         pool="cls",  # "cls" or "mean"
+#         freeze_encoder=True,
+#         flatten_time=True,
+#     ):
+#         super().__init__(size=0, name=name, method=method, eps=eps)
+#         self.encoder_name = encoder_name
+#         self.pool = pool
+#         self.freeze_encoder = freeze_encoder
+#         self.flatten_time = flatten_time
+#
+#         self.processor = AutoImageProcessor.from_pretrained(encoder_name, use_fast=True)
+#         self.encoder = AutoModel.from_pretrained(encoder_name)
+#         self.encoder.eval()
+#
+#         if freeze_encoder:
+#             for p in self.encoder.parameters():
+#                 p.requires_grad_(False)
+#
+#         # infer feature dim
+#         with torch.no_grad():
+#             dev = next(self.encoder.parameters()).device
+#             dummy = torch.zeros(1, 3, 224, 224, device=dev)
+#             feat = self._encode_bchw(dummy)
+#             self.size = feat.shape[-1]
+#
+#         self.register_buffer("feat_mean", torch.zeros(self.size))
+#         self.register_buffer("feat_std", torch.ones(self.size))
+#         self.fitted = True
+#
+#         # for "layernorm_tanh"
+#         self._ln = nn.LayerNorm(self.size)
+#
+#     def set_device(self, device):
+#         super().set_device(device)
+#         self._ln = self._ln.to(device)
+#         self.encoder = self.encoder.to(device)
+#
+#     def _to_bchw_float(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Accept:
+#           - [B,C,H,W] or [B,H,W,C]
+#           - optionally [B,T,C,H,W] or [B,T,H,W,C]
+#         Return:
+#           - [B,C,H,W] float in [0,1] (if uint8 was given), or float as-is.
+#         """
+#         if x.ndim == 5:
+#             # [B, T, ...]
+#             if self.flatten_time:
+#                 B, T = x.shape[:2]
+#                 x = x.reshape(B * T, *x.shape[2:])
+#             else:
+#                 raise ValueError(
+#                     "flatten_time=False not sup ported in this simple version."
+#                 )
+#
+#         if x.ndim != 4:
+#             raise ValueError(
+#                 f"Expected 4D (or 5D with time) image tensor, got {tuple(x.shape)}"
+#             )
+#
+#         # BHWC -> BCHW
+#         if x.shape[1] not in (1, 3) and x.shape[-1] in (1, 3):
+#             x = x.permute(0, 3, 1, 2).contiguous()
+#
+#         if x.dtype == torch.uint8:
+#             x = x.float() / 255.0
+#         else:
+#             x = x.float()
+#
+#         return x
+#
+#     @torch.inference_mode()
+#     def _encode_bchw(self, x_bchw: torch.Tensor) -> torch.Tensor:
+#         """
+#         x_bchw: [B,3,H,W] float
+#         returns: [B,D]
+#         """
+#         dev = next(self.encoder.parameters()).device
+#         x_bchw = x_bchw.to(dev)
+#
+#         # HF processors can accept torch tensors directly as "images"
+#         inputs = self.processor(images=x_bchw, return_tensors="pt", device=dev)
+#         inputs = {k: v.to(dev) for k, v in inputs.items()}
+#
+#         out = self.encoder(**inputs)
+#
+#         # common outputs:
+#         # - ViT/DINO: last_hidden_state [B, N, D]
+#         # - Some models may expose pooler_output [B, D]
+#         if hasattr(out, "pooler_output") and out.pooler_output is not None:
+#             feat = out.pooler_output
+#         else:
+#             tokens = out.last_hidden_state  # [B, N, D]
+#             if self.pool == "cls":
+#                 feat = tokens[:, 0]
+#             elif self.pool == "mean":
+#                 feat = tokens.mean(dim=1)
+#             else:
+#                 raise ValueError(f"Unknown pool={self.pool}")
+#
+#         return feat
+#
+#     def fit(self, data_list, batch_size=64):
+#         """
+#         data_list: iterable of image tensors (any of the supported shapes).
+#         Computes mean/std of *features* (not pixels).
+#         """
+#         pass
+#
+#     def set_stats_from_dict(self, dct):
+#         dev = next(self.encoder.parameters()).device
+#         self.feat_mean = torch.tensor(dct["mean"], device=dev, dtype=torch.float16)
+#         self.feat_std = torch.tensor(dct["std"], device=dev, dtype=torch.float16)
+#         self.fitted = True
+#
+#     @torch.no_grad()
+#     def forward(self, x, **kwargs):
+#         B, L, C, H, W = x.shape
+#         x = self._to_bchw_float(x)
+#         feat = self._encode_bchw(x)
+#         feat = rearrange(feat, "(B L) D -> B L D", B=B)
+#         if self.method == "none":
+#             return feat
+#
+#         if self.method == "standard":
+#             if not self.fitted:
+#                 raise RuntimeError("Need feature mean/std. Call fit() or load stats.")
+#             return (feat - self.feat_mean) / (self.feat_std + self.eps)
+#
+#         if self.method == "tanh_standard":
+#             if not self.fitted:
+#                 raise RuntimeError("Need feature mean/std. Call fit() or load stats.")
+#             z = (feat - self.feat_mean) / (self.feat_std + self.eps)
+#             return torch.tanh(z)  # -> (-1, 1), no min/max
+#
+#         if self.method == "layernorm_tanh":
+#             # no fitting needed; per-sample normalization
+#             return torch.tanh(self._ln(feat))
+#
+#         raise ValueError(f"Unsupported method={self.method}")
+#
+#     @torch.no_grad()
+#     def unnormalize(self, x):
+#         # Only meaningful for reversing standardization (not pixels).
+#         if self.method == "standard":
+#             return x * (self.feat_std + self.eps) + self.feat_mean
+#         if self.method == "tanh_standard":
+#             # tanh is not exactly invertible in a stable way -> don't pretend
+#             return x
+#         return x
 
-    method:
-      - "none": return raw features
-      - "standard": (feat-mean)/std
-      - "tanh_standard": tanh((feat-mean)/std)  -> bounded (-1, 1), no min/max
-      - "layernorm_tanh": tanh(LayerNorm(feat)) -> no fitting, bounded (-1, 1)
-    """
 
-    def __init__(
-        self,
-        size,
-        name,
-        method="tanh_standard",
-        eps=1e-8,
-        encoder_name="facebook/detr-resnet-50",  # good default if you want strong generic features
-        pool="cls",  # "cls" or "mean"
-        freeze_encoder=True,
-        flatten_time=True,
-    ):
-        super().__init__(size=0, name=name, method=method, eps=eps)
-        self.encoder_name = encoder_name
-        self.pool = pool
-        self.freeze_encoder = freeze_encoder
-        self.flatten_time = flatten_time
+class ImageNormalizer(BaseNormalizer):
+    def __init__(self, size, name, method="none", eps=1e-8):
+        super().__init__(size=size, name=name, method=method, eps=eps)
 
-        self.processor = AutoImageProcessor.from_pretrained(encoder_name, use_fast=True)
-        self.encoder = AutoModel.from_pretrained(encoder_name)
-        self.encoder.eval()
+        self.register_buffer(
+            "mean",
+            torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(
+                1, 1, 3, 1, 1
+            ),
+        )
+        self.register_buffer(
+            "std",
+            torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(
+                1, 1, 3, 1, 1
+            ),
+        )
 
-        if freeze_encoder:
-            for p in self.encoder.parameters():
-                p.requires_grad_(False)
+    def forward(self, x, **kwargs):
+        # expected x: [B, L, C, H, W] or [B, L, H, W, C]
+        if x.ndim != 5:
+            raise ValueError(f"Expected 5D tensor, got {tuple(x.shape)}")
 
-        # infer feature dim
-        with torch.no_grad():
-            dev = next(self.encoder.parameters()).device
-            dummy = torch.zeros(1, 3, 224, 224, device=dev)
-            feat = self._encode_bchw(dummy)
-            self.size = feat.shape[-1]
-
-        self.register_buffer("feat_mean", torch.zeros(self.size))
-        self.register_buffer("feat_std", torch.ones(self.size))
-        self.fitted = True
-
-        # for "layernorm_tanh"
-        self._ln = nn.LayerNorm(self.size)
-
-    def set_device(self, device):
-        super().set_device(device)
-        self._ln = self._ln.to(device)
-        self.encoder = self.encoder.to(device)
-
-    def _to_bchw_float(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Accept:
-          - [B,C,H,W] or [B,H,W,C]
-          - optionally [B,T,C,H,W] or [B,T,H,W,C]
-        Return:
-          - [B,C,H,W] float in [0,1] (if uint8 was given), or float as-is.
-        """
-        if x.ndim == 5:
-            # [B, T, ...]
-            if self.flatten_time:
-                B, T = x.shape[:2]
-                x = x.reshape(B * T, *x.shape[2:])
-            else:
-                raise ValueError(
-                    "flatten_time=False not sup ported in this simple version."
-                )
-
-        if x.ndim != 4:
-            raise ValueError(
-                f"Expected 4D (or 5D with time) image tensor, got {tuple(x.shape)}"
-            )
-
-        # BHWC -> BCHW
-        if x.shape[1] not in (1, 3) and x.shape[-1] in (1, 3):
-            x = x.permute(0, 3, 1, 2).contiguous()
+        # BLHWC -> BLCHW
+        if x.shape[2] not in (1, 3) and x.shape[-1] in (1, 3):
+            x = x.permute(0, 1, 4, 2, 3).contiguous()
 
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
         else:
             x = x.float()
 
-        return x
+        if x.shape[2] == 1:
+            x = x.repeat(1, 1, 3, 1, 1)
 
-    @torch.inference_mode()
-    def _encode_bchw(self, x_bchw: torch.Tensor) -> torch.Tensor:
-        """
-        x_bchw: [B,3,H,W] float
-        returns: [B,D]
-        """
-        dev = next(self.encoder.parameters()).device
-        x_bchw = x_bchw.to(dev)
-
-        # HF processors can accept torch tensors directly as "images"
-        inputs = self.processor(images=x_bchw, return_tensors="pt", device=dev)
-        inputs = {k: v.to(dev) for k, v in inputs.items()}
-
-        out = self.encoder(**inputs)
-
-        # common outputs:
-        # - ViT/DINO: last_hidden_state [B, N, D]
-        # - Some models may expose pooler_output [B, D]
-        if hasattr(out, "pooler_output") and out.pooler_output is not None:
-            feat = out.pooler_output
-        else:
-            tokens = out.last_hidden_state  # [B, N, D]
-            if self.pool == "cls":
-                feat = tokens[:, 0]
-            elif self.pool == "mean":
-                feat = tokens.mean(dim=1)
-            else:
-                raise ValueError(f"Unknown pool={self.pool}")
-
-        return feat
-
-    def fit(self, data_list, batch_size=64):
-        """
-        data_list: iterable of image tensors (any of the supported shapes).
-        Computes mean/std of *features* (not pixels).
-        """
-        pass
-
-    def set_stats_from_dict(self, dct):
-        dev = next(self.encoder.parameters()).device
-        self.feat_mean = torch.tensor(dct["mean"], device=dev, dtype=torch.float16)
-        self.feat_std = torch.tensor(dct["std"], device=dev, dtype=torch.float16)
-        self.fitted = True
-
-    @torch.no_grad()
-    def forward(self, x, **kwargs):
-        B, L, C, H, W = x.shape
-        x = self._to_bchw_float(x)
-        feat = self._encode_bchw(x)
-        feat = rearrange(feat, "(B L) D -> B L D", B=B)
         if self.method == "none":
-            return feat
-
-        if self.method == "standard":
-            if not self.fitted:
-                raise RuntimeError("Need feature mean/std. Call fit() or load stats.")
-            return (feat - self.feat_mean) / (self.feat_std + self.eps)
-
-        if self.method == "tanh_standard":
-            if not self.fitted:
-                raise RuntimeError("Need feature mean/std. Call fit() or load stats.")
-            z = (feat - self.feat_mean) / (self.feat_std + self.eps)
-            return torch.tanh(z)  # -> (-1, 1), no min/max
-
-        if self.method == "layernorm_tanh":
-            # no fitting needed; per-sample normalization
-            return torch.tanh(self._ln(feat))
-
-        raise ValueError(f"Unsupported method={self.method}")
-
-    @torch.no_grad()
-    def unnormalize(self, x):
-        # Only meaningful for reversing standardization (not pixels).
-        if self.method == "standard":
-            return x * (self.feat_std + self.eps) + self.feat_mean
-        if self.method == "tanh_standard":
-            # tanh is not exactly invertible in a stable way -> don't pretend
             return x
-        return x
+
+        if self.method == "imagenet":
+            return (x - self.mean) / self.std
+
+        raise ValueError(f"Unsupported image normalization method={self.method}")
+
+    def unnormalize(self, x):
+        if self.method == "none":
+            return x
+        if self.method == "imagenet":
+            return x * self.std + self.mean
+        raise ValueError(f"Unsupported image normalization method={self.method}")
 
 
 class DictNormalizer(nn.Module):
@@ -402,18 +456,18 @@ class DictNormalizer(nn.Module):
         for name, value in param_shapes.items():
             if "camera" in name.lower():
                 # TODO: apply image features extractor and normalizer instead of identity
-                self.normalizers[name] = ImageNormalizerEncoder(
+                self.normalizers[name] = ImageNormalizer(
                     size=value["shape"],  # can be ignored / overwritten internally
                     name=name,
                     method=value["method_norm"],
-                    encoder_name=value.get("encoder_name", "facebook/dinov2-base"),
-                    freeze_encoder=value.get("freeze_encoder", True),
-                    pool=value.get("pool", "cls"),
-                    flatten_time=value.get("flatten_time", True),
+                    # encoder_name=value.get("encoder_name", "facebook/dinov2-base"),
+                    # freeze_encoder=value.get("freeze_encoder", True),
+                    # pool=value.get("pool", "cls"),
+                    # flatten_time=value.get("flatten_time", True),
                 )
 
-            # elif "qpos" in name:
-            elif "angle" in name:
+            elif "qpos" in name:
+                # elif "angle" in name:
                 # Use AnglesSinCos for angle representations
                 self.normalizers[name] = AnglesSinCos(
                     size=value["shape"],

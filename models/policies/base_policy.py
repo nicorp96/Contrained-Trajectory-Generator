@@ -1,8 +1,10 @@
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 import os
+from pathlib import Path
 import torch
 
 from common.get_class import get_class_dict
+from common.utils import load_config
 from dataset.utils import get_ds_from_cfg
 from models.utils.guidance_robot import BaseGuidance
 
@@ -37,11 +39,13 @@ class Policy:
         self.num_inference_steps = self.config["model"]["num_inference_steps"]
 
     def __load_ckp__(self, ckpt_path):
-        checkpoint_path = ckpt_path
-        if not os.path.exists(checkpoint_path):
+        checkpoint_path = Path(ckpt_path)
+        base_ = checkpoint_path.parent.parent
+        config_f = base_ / "files" / "config.yaml"
+        if not os.path.exists(checkpoint_path) or not os.path.isfile(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
         self.checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.config = self.checkpoint["config"]
+        self.config = load_config(config_f)  # self.checkpoint["config"]
         # self.config_policy = self.config["policy"]
 
     def setup_model(self):

@@ -1,11 +1,11 @@
 name: "diffusion_trj_padding"
 target: trainer.trainer_diffusion_traj.DiffusionTrajectoryPadHistTrainer
-inpainting: True
-start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10, 11, 12, 13, 14, 15]
+inpainting: False
+start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8]
 
 model:
   target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
-  input_dim: 25        # qpos: 9 * 2, tcp pose: 7
+  input_dim: 26        # qpos: 9 * 2, tcp pose: 7
   cond_dim: 7         # TCP pose END
   diffusion_t_embed_dim: 128
   d_model: 128
@@ -13,7 +13,7 @@ model:
   n_blocks: 3
   dropout: 0.1
   history: True
-  history_shape: 1561
+  history_shape: 1050
   time_encoder: False
   time_t_embed_dim: 128
   num_inference_steps: 25
@@ -32,13 +32,26 @@ model:
   guidance:
     target: models.utils.guidance_robot.CFGGuidance
     guidance_scale: 1.5
+  image_encoders:
+    base_camera:
+      type: "resnet18"
+      pretrained: True
+      trainable: True
+      out_pool: "avg"
+    hand_camera:
+      type: "resnet18" #"dinov2"
+      #name: "facebook/dinov2-base"
+      pretrained: True
+      trainable: True
+      out_pool: "avg"
+      #pool: "cls"
 
 training:
   batch_size: 64
   learning_rate: 0.0001
   num_epochs: 5501
   use_ema: True
-  optimizer: "adam"
+  optimizer: "adamw"
   log_dir: "runs/training"
   log_eval_dir: "runs/inference"
   output_dir: "logs"
@@ -77,8 +90,8 @@ dataset:
     qpos:
       shape: 9
       method_norm: "minmax"
-    tcp_pose:
-      shape: 7
+    actions:
+      shape: 8
       method_norm: "minmax"
 
   goal_shapes:
@@ -91,15 +104,14 @@ dataset:
     qpos:
       shape: 9
       method_norm: "minmax"
-    tcp_pose:
-      shape: 7
+    actions:
+      shape: 8
       method_norm: "minmax"
     base_camera:
       shape: (3, 128, 128)
       type: "rgb"
-      method_norm: "layernorm_tanh"
-
+      method_norm: "none"
     hand_camera:
       shape: (3, 128, 128)
       type: "rgb"
-      method_norm: "layernorm_tanh"
+      method_norm: "none"
