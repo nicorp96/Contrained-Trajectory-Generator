@@ -16,7 +16,13 @@ from dataset.utils import get_ds_from_cfg
 from global_parameters import ConfigGlobalP
 from models.utils.ema import EMA
 from models.utils.guidance_robot import BaseGuidance, CFGGuidance
-from models.utils.encoders_robot import ResNet18Encoder, HFVisionEncoder
+from models.utils.encoders_robot import (
+    ResNet18Encoder,
+    HFVisionEncoder,
+    freeze_all_parameters,
+    unfreeze_resnet_last_n,
+    unfreeze_hf_last_n,
+)
 from trainer.base_trainer import BaseTrainer
 
 cfg_gp = ConfigGlobalP()
@@ -46,13 +52,14 @@ class DiffusionTrainer(BaseTrainer):
         )
 
     @staticmethod
-    def load_image_encoder(config, device):
+    def load_image_encoder(config, device=None):
         encoder_cfg = config.get("image_encoders", {})
         encoder_dict = nn.ModuleDict()
 
         for key, cfg in encoder_cfg.items():
             enc_type = cfg["type"].lower()
             trainable = cfg.get("trainable", False)
+            train_last_n = cfg.get("train_last_n", None)
 
             if enc_type == "resnet18":
                 encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
@@ -69,17 +76,27 @@ class DiffusionTrainer(BaseTrainer):
 
             else:
                 raise ValueError(f"Unsupported image encoder type: {enc_type}")
-            # encoder = encoder.to(device=device)
+
             if enc_type != "none":
-                for p in encoder.parameters():
-                    p.requires_grad_(trainable)
+                # freeze all first
+                freeze_all_parameters(encoder)
 
                 if trainable:
+                    if train_last_n is None:
+                        # if user wants full finetuning
+                        for p in encoder.parameters():
+                            p.requires_grad_(True)
+                    else:
+                        if enc_type == "resnet18":
+                            unfreeze_resnet_last_n(encoder, n=train_last_n)
+                        else:
+                            unfreeze_hf_last_n(encoder, n=train_last_n)
                     encoder.train()
                 else:
                     encoder.eval()
 
             encoder_dict[key] = encoder
+
         return encoder_dict
 
     def setup_optimizer(self):

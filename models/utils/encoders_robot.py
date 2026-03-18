@@ -54,3 +54,55 @@ class HFVisionEncoder(nn.Module):
             return tokens.mean(dim=1)
         else:
             raise ValueError(f"Unknown pool={self.pool}")
+
+
+def freeze_all_parameters(module):
+    for p in module.parameters():
+        p.requires_grad_(False)
+
+
+def unfreeze_resnet_last_n(encoder, n=1):
+    # assumes encoder.encoder is a torchvision resnet
+    layers = ["layer1", "layer2", "layer3", "layer4"]
+    for layer_name in layers[-n:]:
+        layer = getattr(encoder.encoder, layer_name, None)
+        if layer is not None:
+            for p in layer.parameters():
+                p.requires_grad_(True)
+
+
+def unfreeze_hf_last_n(encoder, n=1):
+    # common HF transformer layout
+    backbone = encoder.backbone if hasattr(encoder, "backbone") else encoder.encoder
+
+    # try common transformer block containers
+    candidate_paths = [
+        ("encoder", "layer"),  # BERT/ViT-like
+        ("encoder", "layers"),  # some variants
+        ("layers",),  # some custom models
+        ("layer",),  # fallback
+    ]
+
+    blocks = None
+    for path in candidate_paths:
+        obj = backbone
+        ok = True
+        for attr in path:
+            if hasattr(obj, attr):
+                obj = getattr(obj, attr)
+            else:
+                ok = False
+                break
+        if ok:
+            blocks = obj
+            break
+
+    if blocks is None:
+        # fallback: unfreeze everything if structure unknown
+        for p in backbone.parameters():
+            p.requires_grad_(True)
+        return
+
+    for block in list(blocks)[-n:]:
+        for p in block.parameters():
+            p.requires_grad_(True)

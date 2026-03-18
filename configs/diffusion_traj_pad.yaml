@@ -37,6 +37,8 @@ model:
       type: "resnet18"
       pretrained: True
       trainable: True
+      train_last_n: 1
+      #train_last_n: 2
       out_pool: "avg"
     hand_camera:
       type: "resnet18" #"dinov2"
@@ -44,6 +46,8 @@ model:
       pretrained: True
       trainable: True
       out_pool: "avg"
+      train_last_n: 1
+      #train_last_n: 2
       #pool: "cls"
 
 training:
