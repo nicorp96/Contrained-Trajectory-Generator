@@ -29,8 +29,20 @@ class DiffusionTrainer(BaseTrainer):
         self.goal_indices = config.get("goal_indices", None)
         self.start_indices = config.get("start_indices", None)
         self.inpainting = config.get("inpainting", True)
-        self.image_encoder_dict = self.load_image_encoder(
-            config["model"], self.accelerator.device
+
+    def prepare_all_accelerator(self):
+        (
+            self.model,
+            self.image_encoder_dict,
+            self.optimizer,
+            self.train_loader,
+            self.val_loader,
+        ) = self.accelerator.prepare(
+            self.model,
+            self.image_encoder_dict,
+            self.optimizer,
+            self.train_loader,
+            self.val_loader,
         )
 
     @staticmethod
@@ -57,7 +69,7 @@ class DiffusionTrainer(BaseTrainer):
 
             else:
                 raise ValueError(f"Unsupported image encoder type: {enc_type}")
-            encoder = encoder.to(device=device)
+            # encoder = encoder.to(device=device)
             if enc_type != "none":
                 for p in encoder.parameters():
                     p.requires_grad_(trainable)
@@ -116,6 +128,10 @@ class DiffusionTrainer(BaseTrainer):
         if self.config["training"]["use_ema"]:
             self.ema_model = copy.deepcopy(self.model)
             self.ema = EMA(self.ema_model, self.config["ema"])
+
+        self.image_encoder_dict = self.load_image_encoder(
+            self.config["model"], self.accelerator.device
+        )
 
     def setup_scheduler(self):
         super().setup_scheduler()
@@ -200,7 +216,9 @@ class DiffusionTrainer(BaseTrainer):
                 "ema_state": (
                     self.ema.model.state_dict() if self.ema is not None else None
                 ),
-                "image_encoders_state": self.image_encoder_dict.state_dict(),
+                "image_encoders_state": self.accelerator.unwrap_model(
+                    self.image_encoder_dict
+                ).state_dict(),
                 "normalizer": {
                     "normalizer_state": self.normalizer_state.state_dict(),
                     "normalizer_goal": self.normalizer_goal.state_dict(),

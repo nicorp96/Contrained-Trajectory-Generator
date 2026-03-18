@@ -134,9 +134,9 @@ class Normalizer(BaseNormalizer):
                 return x_temp
             return (x - self.mean) / (self.std + self.eps)
         elif self.method == "minmax":
-            # self.max = self.max.to(x.device)
-            # self.min = self.min.to(x.device)
-            return 2 * (x - self.min) / (self.max - self.min + self.eps) - 1
+            max = self.max.to(x.device)
+            min = self.min.to(x.device)
+            return 2 * (x - min) / (max - min + self.eps) - 1
         elif self.method == "path_len":
             seg_len = np.linalg.norm(np.diff(x, axis=0), axis=1)
             D = seg_len.sum()
@@ -425,10 +425,10 @@ class ImageNormalizer(BaseNormalizer):
         if x.shape[2] not in (1, 3) and x.shape[-1] in (1, 3):
             x = x.permute(0, 1, 4, 2, 3).contiguous()
 
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        else:
-            x = x.float()
+        # if x.dtype == torch.uint8:
+        #     x = x.float() / 255.0
+        # else:
+        #     x = x.float()
 
         if x.shape[2] == 1:
             x = x.repeat(1, 1, 3, 1, 1)
@@ -455,7 +455,6 @@ class DictNormalizer(nn.Module):
         self.normalizers = nn.ModuleDict()
         for name, value in param_shapes.items():
             if "camera" in name.lower():
-                # TODO: apply image features extractor and normalizer instead of identity
                 self.normalizers[name] = ImageNormalizer(
                     size=value["shape"],  # can be ignored / overwritten internally
                     name=name,
@@ -466,7 +465,7 @@ class DictNormalizer(nn.Module):
                     # flatten_time=value.get("flatten_time", True),
                 )
 
-            elif "qpos" in name:
+            elif "qpos" in name or "actions" in name:
                 # elif "angle" in name:
                 # Use AnglesSinCos for angle representations
                 self.normalizers[name] = AnglesSinCos(

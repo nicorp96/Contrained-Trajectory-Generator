@@ -71,11 +71,12 @@ class BaseTrainer:
 
         # ---- Prepare with accelerator (model/opt/loaders) ----
         # IMPORTANT: scheduler is NOT prepared
-        self.model, self.optimizer, self.train_loader, self.val_loader = (
-            self.accelerator.prepare(
-                self.model, self.optimizer, self.train_loader, self.val_loader
-            )
-        )
+        self.prepare_all_accelerator()
+        # self.model, self.optimizer, self.train_loader, self.val_loader = (
+        #     self.accelerator.prepare(
+        #         self.model, self.optimizer, self.train_loader, self.val_loader
+        #     )
+        # )
 
         # ---- After prepare: logging/writer only on main ----
         self.setup_logging()
@@ -97,6 +98,13 @@ class BaseTrainer:
     # -------------------------
     # Abstract hooks
     # -------------------------
+    def prepare_all_accelerator(self):
+        self.model, self.optimizer, self.train_loader, self.val_loader = (
+            self.accelerator.prepare(
+                self.model, self.optimizer, self.train_loader, self.val_loader
+            )
+        )
+
     def setup_normalizer(self):
         raise NotImplementedError(
             "setup_normalizer() must be implemented in subclasses"

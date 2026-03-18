@@ -1,12 +1,11 @@
 name: "diffusion_trj_resampling"
 target: trainer.trainer_diffusion_traj.DiffusionTrajectoryPadHistRSTrainer
-inpainting: True
+inpainting: False
 start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8 ,9, 10, 11, 12, 13, 14, 15]
-goal_indices: [9, 10, 11] # tcp position of the goal
 
 model:
-  target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
-  input_dim: 16        # pos: 3, vel: 3
+  target: models.diffusion_transformer.DiTTrjCC
+  input_dim: 34        # pos: 3, vel: 3
   cond_dim: 7         # start - pip: 3, goal angle: 2 (sin, cos) , current_angles: 6 : 3*2, stat_vel: 3
   diffusion_t_embed_dim: 128
   d_model: 128
@@ -14,7 +13,7 @@ model:
   n_blocks: 4
   dropout: 0.1
   history: True
-  history_shape: 1552
+  history_shape: 1058
   time_encoder: False
   time_t_embed_dim: 128
   num_inference_steps: 25
@@ -35,6 +34,19 @@ model:
     guidance_eta: 0.0005
     guidance_scale: 1.5
     grad_guid: True
+  image_encoders:
+    base_camera:
+      type: "resnet18"
+      pretrained: True
+      trainable: True
+      out_pool: "avg"
+    hand_camera:
+      type: "resnet18" #"dinov2"
+      #name: "facebook/dinov2-base"
+      pretrained: True
+      trainable: True
+      out_pool: "avg"
+      #pool: "cls"
 
 
 training:
@@ -88,28 +100,27 @@ dataset:
     qpos:
       shape: 9
       method_norm: "minmax"
-    tcp_pose:
-      shape: 7
+    actions:
+      shape: 8
       method_norm: "minmax"
 
   goal_shapes:
-    tcp_pose:
+    box_hole_pose:
       shape: 7
       method_norm: "minmax"
-      # camera?
 
   obs_shapes:
     qpos:
       shape: 9
       method_norm: "minmax"
-    tcp_pose:
-      shape: 7
+    actions:
+      shape: 8
       method_norm: "minmax"
     base_camera:
       shape: (3, 128, 128)
       type: "rgb"
-      method_norm: "layernorm_tanh"
+      method_norm: "none"
     hand_camera:
       shape: (3, 128, 128)
       type: "rgb"
-      method_norm: "layernorm_tanh"
+      method_norm: "none"

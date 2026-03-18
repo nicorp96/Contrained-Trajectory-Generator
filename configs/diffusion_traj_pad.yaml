@@ -5,7 +5,7 @@ start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8]
 
 model:
   target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
-  input_dim: 26        # qpos: 9 * 2, tcp pose: 7
+  input_dim: 34        # qpos: 9 * 2, tcp pose: 7 *2
   cond_dim: 7         # TCP pose END
   diffusion_t_embed_dim: 128
   d_model: 128
@@ -13,7 +13,7 @@ model:
   n_blocks: 3
   dropout: 0.1
   history: True
-  history_shape: 1050
+  history_shape: 1058
   time_encoder: False
   time_t_embed_dim: 128
   num_inference_steps: 25
@@ -49,6 +49,7 @@ model:
 training:
   batch_size: 64
   learning_rate: 0.0001
+  image_encoder_lr: 0.00001
   num_epochs: 5501
   use_ema: True
   optimizer: "adamw"

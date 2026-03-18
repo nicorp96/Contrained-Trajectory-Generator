@@ -7,6 +7,7 @@ from transformers import AutoModel, AutoImageProcessor
 class ResNet18Encoder(nn.Module):
     def __init__(self, pretrained=True):
         super().__init__()
+        self.preprocess = tvm.ResNet18_Weights.DEFAULT.transforms()
         weights = tvm.ResNet18_Weights.DEFAULT if pretrained else None
         model = tvm.resnet18(weights=weights)
         model.fc = nn.Identity()
@@ -14,7 +15,7 @@ class ResNet18Encoder(nn.Module):
         self.output_dim = 512
 
     def forward(self, x):
-        # x: [B, C, H, W]
+        x = self.preprocess(x)  # [B, C, H, W]
         return self.backbone(x)  # [B, 512]
 
 
