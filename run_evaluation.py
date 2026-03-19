@@ -9,13 +9,13 @@ import torch
 from common.get_class import get_class_dict
 from common.utils import load_config
 from global_parameters import ConfigGlobalP
-from models.policies.diff_policy import DiffPolicy
+from models.policies.diff_policy import DiffPolicyEncoder
 
 
 @dataclass
 class EvaluationConfig:
     CKPT: Path = Path(
-        "logs/diffusion_trj_padding/20260306-091210/logs/checkpoint_900.pth"
+        "logs/diffusion_trj_padding_encoder/20260318-132234/logs/checkpoint_1000.pth"
     )
 
 
@@ -38,12 +38,12 @@ def main(args):
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     try:
         checkpoint_path = os.path.join(cfg_global_p.LOGS_DIR, cfg_eval.CKPT)
-        policy = DiffPolicy(
+        policy = DiffPolicyEncoder(
             checkpoint_path,
             device,
             only_actions=True,
             action_key="actions",
-            action_horizon=1,
+            action_horizon=2,
         )
         env = get_environment(policy.config.get("env_id", "PegInsertionSide-v1"))
         obs, info = env.reset()
@@ -67,7 +67,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Trajectory Generator")
+    parser = argparse.ArgumentParser(description="Evaluate Trajectory Generator")
     parser.add_argument(
         "-c", "--config", help="Name of config file", default="diffusion"
     )

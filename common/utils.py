@@ -56,7 +56,11 @@ def split_state_tensor(state_tensor: torch.Tensor, param_shapes: dict) -> dict:
     split_dict = {}
     start = 0
     for name in param_shapes.keys():
-        end = start + param_shapes[name]["shape"]
+        slc = param_shapes[name]["shape"]
+        method = param_shapes[name]["method_norm"]
+        if method == "sincos":
+            slc = param_shapes[name]["shape"] * 2
+        end = start + slc
         split_dict[name] = state_tensor[:, :, start:end].detach().cpu()
         start = end
     return split_dict

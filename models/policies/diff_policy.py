@@ -1,12 +1,18 @@
 from collections import deque
 from einops import repeat, rearrange
 import torch
+import torch.nn as nn
 import time
 
 
 from common.utils import split_state_tensor
 from common.inpainting import apply_inpainting, make_inpainting_mask
 from models.policies.base_policy import Policy
+from models.utils.encoders_robot import (
+    ResNet18Encoder,
+    HFVisionEncoder,
+    freeze_all_parameters,
+)
 
 
 class TensorHistory:
@@ -135,6 +141,7 @@ class DiffPolicy(Policy):
             [goals_norm[key] for key in goals_norm.keys()],
             dim=1,
         ).to(device)
+
         trajectory_history = torch.cat(
             [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
             dim=2,
@@ -201,6 +208,110 @@ class DiffPolicy(Policy):
                 :, : self.action_horizon, :
             ]
         return output_unnormalized
+
+
+class DiffPolicyEncoder(DiffPolicy):
+    def __init__(self,  config, device, only_actions=True, **kwargs):
+        super().__init__( config, device, only_actions, **kwargs)
+
+    @staticmethod
+    def load_image_encoder(config, device=None):
+        encoder_cfg = config["model"].get("image_encoders", {})
+        encoder_dict = nn.ModuleDict()
+
+        for key, cfg in encoder_cfg.items():
+            enc_type = cfg["type"].lower()
+            if enc_type == "resnet18":
+                encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
+            elif enc_type in {"dinov2", "hf", "transformer"}:
+                encoder = HFVisionEncoder(
+                    model_name=cfg["name"],
+                    pool=cfg.get("pool", "cls"),
+                )
+            elif enc_type == "none":
+                encoder = nn.Identity()
+                encoder.output_dim = config["dataset"]["state_shapes"][key]["shape"][0]
+            else:
+                raise ValueError(f"Unsupported image encoder type: {enc_type}")
+
+            if enc_type != "none":
+                # freeze all first
+                freeze_all_parameters(encoder)
+            encoder.eval()
+            encoder_dict[key] = encoder
+
+        return encoder_dict
+
+    def setup_model(self):
+        super().setup_model()
+        # build encoders from config
+        self.image_encoder_dict = self.load_image_encoder(self.config)
+
+        # load encoder weights if present
+        enc_state = self.checkpoint["state_dicts"].get("image_encoders_state", None)
+        if enc_state is not None:
+            self.image_encoder_dict.load_state_dict(enc_state)
+
+        self.image_encoder_dict = self.image_encoder_dict.to(self.device)
+
+    @torch.inference_mode()
+    def encode_image_observations(self, obs_dict):
+        encoded = {}
+
+        for key, value in obs_dict.items():
+            if key in self.image_encoder_dict:
+                encoder = self.image_encoder_dict[key]
+
+                # value expected [B, L, C, H, W]
+                B, L, C, H, W = value.shape
+                x = value.reshape(B * L, C, H, W)
+
+                feat = encoder(x)
+
+                if feat.ndim == 4:
+                    feat = feat.flatten(1)
+
+                feat = feat.reshape(B, L, -1)
+                encoded[key] = feat
+            else:
+                encoded[key] = value
+
+        return encoded
+
+    def __call__(self, obs):
+        states_dict, goals_dict = self.get_states_goal_extra_from_obs(obs)
+        device = self.device
+        ctx_hist = self.contex_history.get_stacked()
+        # Normalize
+        states_norm_dict = self.normalizer_state(states_dict)
+        goals_norm = self.normalizer_goal(goals_dict)
+        history_dict_nm = self.normalizer_obs(ctx_hist)
+        history_dict_nm = self.encode_image_observations(history_dict_nm)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
+        out_trj = self.conditional_sample(
+            states_norm_dict, goals_norm, history_dict_nm, device=device
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+
+        print(f"conditional_sample: {(t1 - t0) * 1000:.3f} ms")
+
+        output_dict = split_state_tensor(
+            out_trj, self.config["dataset"]["state_shapes"]
+        )
+        output_unnormalized = self.normalizer_state.unnormalize(output_dict)
+        if self.only_actions:
+            output_unnormalized = output_unnormalized[self.action_key][
+                :, : self.action_horizon, :
+            ]
+        return output_unnormalized
+
 
 
 if __name__ == "__main__":
