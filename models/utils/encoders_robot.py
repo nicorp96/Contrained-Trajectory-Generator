@@ -65,7 +65,7 @@ def unfreeze_resnet_last_n(encoder, n=1):
     # assumes encoder.encoder is a torchvision resnet
     layers = ["layer1", "layer2", "layer3", "layer4"]
     for layer_name in layers[-n:]:
-        layer = getattr(encoder.encoder, layer_name, None)
+        layer = getattr(encoder, layer_name, None)
         if layer is not None:
             for p in layer.parameters():
                 p.requires_grad_(True)

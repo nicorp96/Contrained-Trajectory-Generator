@@ -589,7 +589,8 @@ class BaseTrainer:
         start = 0
         for name in param_shapes.keys():
             slc = param_shapes[name]["shape"]
-            if name == "qpos" or name == "actions":
+            method = param_shapes[name]["method_norm"]
+            if method == "sincos":
                 slc = param_shapes[name]["shape"] * 2
             end = start + slc
             split_dict[name] = state_tensor[:, :, start:end].detach().cpu()

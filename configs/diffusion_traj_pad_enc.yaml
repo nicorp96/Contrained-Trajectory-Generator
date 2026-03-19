@@ -13,7 +13,7 @@ model:
   n_blocks: 3
   dropout: 0.1
   history: True
-  history_shape: 1059
+  history_shape: 1571
   time_encoder: False
   time_t_embed_dim: 256
   num_inference_steps: 25
@@ -34,20 +34,21 @@ model:
     guidance_scale: 1.5
   image_encoders:
     base_camera:
-      type: "resnet18"
+      type: "dinov2" #"resnet"
+      name: "facebook/dinov2-base"
       pretrained: True
-      trainable: True
+      trainable: False
+      #train_last_n: 1
       train_last_n: 1
-      #train_last_n: 2
       out_pool: "avg"
     hand_camera:
-      type: "resnet18" #"dinov2"
-      #name: "facebook/dinov2-base"
+      type: "dinov2" #"dinov2"
+      name: "facebook/dinov2-base"
       pretrained: True
-      trainable: True
+      trainable: False
       out_pool: "avg"
+      #train_last_n: 1
       train_last_n: 1
-      #train_last_n: 2
       #pool: "cls"
 
 training:

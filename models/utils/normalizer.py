@@ -465,7 +465,7 @@ class DictNormalizer(nn.Module):
                     # flatten_time=value.get("flatten_time", True),
                 )
 
-            elif "qpos" in name or "actions" in name:
+            elif value["method_norm"] == "sincos":
                 # elif "angle" in name:
                 # Use AnglesSinCos for angle representations
                 self.normalizers[name] = AnglesSinCos(

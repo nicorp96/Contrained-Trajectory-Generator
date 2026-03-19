@@ -14,7 +14,7 @@ def get_ds_from_cfg(config):
     if config["val"]:
         train_size = int((1.0 - config["val_ratio"]) * len(ds_train))
         # TODO: Check if +1
-        val_size = int(config["val_ratio"] * len(ds_train))
+        val_size = int(config["val_ratio"] * len(ds_train)) +1
         ds_train, ds_val = random_split(ds_train, [train_size, val_size])
     return ds_train, ds_val
 
