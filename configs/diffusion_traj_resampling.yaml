@@ -38,14 +38,14 @@ model:
     base_camera:
       type: "resnet18"
       pretrained: True
-      trainable: True
+      trainable: False
       out_pool: "avg"
       train_last_n: 1
     hand_camera:
       type: "resnet18" #"dinov2"
       #name: "facebook/dinov2-base"
       pretrained: True
-      trainable: True
+      trainable: False
       out_pool: "avg"
       train_last_n: 1
       #train_last_n: 2

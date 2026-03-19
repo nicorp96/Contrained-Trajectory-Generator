@@ -618,7 +618,7 @@ def build_schema_from_layout(
             kind = kind_map[n]
         else:
             # ---- heuristics (add qpos)
-            if "qpos" in n:
+            if "qpos" in n or "actions" in n:
                 # joint positions in radians -> wrap-aware interpolation
                 kind = "angle_vec"
 
