@@ -15,7 +15,7 @@ from models.policies.diff_policy import DiffPolicyEncoder
 @dataclass
 class EvaluationConfig:
     CKPT: Path = Path(
-        "logs/diffusion_trj_padding_encoder/20260318-132234/logs/checkpoint_1000.pth"
+        "logs/diffusion_trj_vel_padding/20260320-150115/logs/checkpoint_2700.pth"
     )
 
 
@@ -27,7 +27,7 @@ def get_environment(id="PegInsertionSide-v1"):
     env = gym.make(
         id,
         obs_mode="state_dict+rgb+depth",
-        control_mode="pd_joint_pos",
+        control_mode="pd_joint_delta_pos",
         render_mode="rgb_array",
         reconfiguration_freq=1,
     )
@@ -43,12 +43,11 @@ def main(args):
             device,
             only_actions=True,
             action_key="actions",
-            action_horizon=2,
+            action_horizon=1,
         )
         env = get_environment(policy.config.get("env_id", "PegInsertionSide-v1"))
         obs, info = env.reset()
-        init_action = obs["agent"]["qpos"][:, : env.action_space.shape[0]]
-        init_action[:, -1] = 1.0
+        init_action = torch.zeros((1, 8))
         obs.update({"actions": init_action})
         while not info["success"]:
             actions = policy(obs)
