@@ -40,7 +40,8 @@ class HFVisionEncoder(nn.Module):
         dev = next(self.backbone.parameters()).device
         x = x.to(dev)
 
-        inputs = self.processor(images=x, return_tensors="pt")
+        # inputs are already float in [0, 1] (see ImageNormalizer)
+        inputs = self.processor(images=x, return_tensors="pt", do_rescale=False)
         inputs = {k: v.to(dev) for k, v in inputs.items()}
         out = self.backbone(**inputs)
 

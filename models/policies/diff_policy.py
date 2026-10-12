@@ -98,7 +98,7 @@ class DiffPolicy(Policy):
         shapes_dict = self.config["dataset"]["goal_shapes"]
         for key in shapes_dict.keys():
             data = self.get_dict_from_obs(obs, key)
-            out[key] = data + 0.1
+            out[key] = data
         return out
 
     def get_context_from_obs(self, obs):

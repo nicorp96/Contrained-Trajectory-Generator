@@ -425,10 +425,11 @@ class ImageNormalizer(BaseNormalizer):
         if x.shape[2] not in (1, 3) and x.shape[-1] in (1, 3):
             x = x.permute(0, 1, 4, 2, 3).contiguous()
 
-        # if x.dtype == torch.uint8:
-        #     x = x.float() / 255.0
-        # else:
-        #     x = x.float()
+        # Encoders expect float images in [0, 1]; dataset and env both provide uint8
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        else:
+            x = x.float()
 
         if x.shape[2] == 1:
             x = x.repeat(1, 1, 3, 1, 1)
