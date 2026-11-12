@@ -40,14 +40,25 @@ def dataset_env_info(config):
     return {"env_id": env_info["env_id"], **env_info.get("env_kwargs", {})}
 
 
-def make_env(env_id, control_mode, max_steps, video_dir=None):
-    """Evaluation env; with video_dir every episode is written as <index>.mp4."""
+# env kwargs of the demonstrations that define what the cameras see
+CAMERA_KWARGS = ("sensor_configs", "extra_cameras")
+
+
+def camera_kwargs(env_info):
+    """Camera settings recorded with the demonstrations (resolution, extra cameras)."""
+    return {k: env_info[k] for k in CAMERA_KWARGS if k in env_info}
+
+
+def make_env(env_id, control_mode, max_steps, video_dir=None, **env_kwargs):
+    """Evaluation env; with video_dir every episode is written as <index>.mp4.
+    env_kwargs: e.g. camera_kwargs() of the dataset."""
     env = gym.make(
         env_id,
         obs_mode="state_dict+rgb",
         control_mode=control_mode,
         render_mode="rgb_array" if video_dir else None,
         max_episode_steps=max_steps,
+        **env_kwargs,
     )
     if video_dir:
         env = RecordEpisode(
@@ -101,7 +112,9 @@ def main(args):
     control_mode = args.control_mode or env_info.get("control_mode", "pd_joint_delta_pos")
     print(f"env_id={env_id} control_mode={control_mode}")
 
-    env = make_env(env_id, control_mode, args.max_steps, args.video_dir)
+    cams = camera_kwargs(env_info)
+    print(f"cameras: {cams or 'environment default'}")
+    env = make_env(env_id, control_mode, args.max_steps, args.video_dir, **cams)
     act_dim = env.action_space.shape[-1]
 
     results = []

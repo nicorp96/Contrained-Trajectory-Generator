@@ -1,10 +1,10 @@
-"""Tests for the video recording helpers of run_evaluation.py."""
+"""Tests for the env and video helpers of run_evaluation.py."""
 
 import pytest
 
 pytest.importorskip("mani_skill")
 
-from run_evaluation import make_env, rename_videos  # noqa: E402
+from run_evaluation import camera_kwargs, make_env, rename_videos  # noqa: E402
 
 ENV_ID = "PegInsertionSide-v1"
 CONTROL_MODE = "pd_joint_delta_pos"
@@ -57,6 +57,28 @@ def test_make_env_records_one_video_per_episode(tmp_path):
     finally:
         env.close()
     assert sorted(p.name for p in tmp_path.glob("*.mp4")) == ["0.mp4", "1.mp4"]
+
+
+def test_camera_kwargs_picks_camera_settings_only():
+    env_info = {"env_id": "X", "control_mode": "pd_joint_delta_pos", "sensor_configs": {"width": 256},
+                "extra_cameras": [{"uid": "top_camera"}], "sim_backend": "physx_cpu"}
+    assert camera_kwargs(env_info) == {"sensor_configs": {"width": 256}, "extra_cameras": [{"uid": "top_camera"}]}
+    assert camera_kwargs({"env_id": "X"}) == {}
+
+
+def test_make_env_uses_dataset_cameras():
+    env = make_env(
+        "PegInsertionSide-Extended", CONTROL_MODE, max_steps=5,
+        sensor_configs={"width": 48, "height": 48},
+        extra_cameras=[{"uid": "top_camera", "eye": [0.0, 0.12, 0.65], "target": [0.0, 0.22, 0.1]}],
+    )
+    try:
+        obs, _ = env.reset(seed=0)
+        cams = obs["sensor_data"]
+        assert set(cams) == {"base_camera", "hand_camera", "top_camera"}
+        assert all(cams[c]["rgb"].shape[1:3] == (48, 48) for c in cams)
+    finally:
+        env.close()
 
 
 def _wrapper_names(env):
