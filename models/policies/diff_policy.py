@@ -40,12 +40,19 @@ class DiffPolicy(Policy):
 
     obs must contain the ManiSkill observation dict plus obs["actions"]: the last
     executed action (zeros at the first step), matching the training history.
+
+    When several actions are executed per plan (action_horizon > 1), call
+    observe(obs) after every env step and plan with __call__(obs, observe=False),
+    so the history holds consecutive steps as in training.
     """
 
     def __init__(self, config, device, only_actions=True, **kwargs):
         super().__init__(config, device, only_actions, **kwargs)
         self.action_key = kwargs.get("action_key", "actions")
-        self.action_horizon = int(kwargs.get("action_horizon", 1))
+        self.action_horizon = int(
+            kwargs.get("action_horizon")
+            or self.config.get("evaluation", {}).get("action_horizon", 1)
+        )
         self.verbose = bool(kwargs.get("verbose", False))
         self.reset()
 
@@ -135,10 +142,15 @@ class DiffPolicy(Policy):
             x = apply_inpainting(x, mask_known, trj, noise=False)
         return x
 
-    def __call__(self, obs):
+    def observe(self, obs):
+        """Append one observation to the history (once per executed env step)."""
+        self.contex_history.update(self.get_context_from_obs(obs))
+
+    def __call__(self, obs, observe=True):
         states_dict = self.get_states_from_obs(obs)
         goals_dict = self.get_goal_from_obs(obs)
-        self.contex_history.update(self.get_context_from_obs(obs))
+        if observe:
+            self.observe(obs)
 
         states_norm_dict = self.normalizer_state(
             {k: v.to(self.device) for k, v in states_dict.items()}

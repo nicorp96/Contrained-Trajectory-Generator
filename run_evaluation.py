@@ -6,6 +6,7 @@ Closed-loop evaluation of a trained policy in ManiSkill.
 Reports success rate over seeded episodes plus physical-constraint violations of
 the executed joint trajectories; writes a JSON summary next to the checkpoint.
 Inference-time ablations: --constraint-eta, --project-final, --guidance-scale.
+--video-dir records one mp4 per episode (episode_XXX_success|fail.mp4).
 """
 
 import argparse
@@ -17,6 +18,7 @@ import gymnasium as gym
 import mani_skill.envs  # noqa: F401  (registers environments)
 import numpy as np
 import torch
+from mani_skill.utils.wrappers import RecordEpisode
 
 import environment.extended_peg_insertion  # noqa: F401  (registers PegInsertionSide-Extended)
 from global_parameters import ConfigGlobalP
@@ -36,6 +38,36 @@ def dataset_env_info(config):
     with open(json_path) as f:
         env_info = json.load(f)["env_info"]
     return {"env_id": env_info["env_id"], **env_info.get("env_kwargs", {})}
+
+
+def make_env(env_id, control_mode, max_steps, video_dir=None):
+    """Evaluation env; with video_dir every episode is written as <index>.mp4."""
+    env = gym.make(
+        env_id,
+        obs_mode="state_dict+rgb",
+        control_mode=control_mode,
+        render_mode="rgb_array" if video_dir else None,
+        max_episode_steps=max_steps,
+    )
+    if video_dir:
+        env = RecordEpisode(
+            env, output_dir=str(video_dir), save_trajectory=False, save_video=True,
+            max_steps_per_video=max_steps,
+        )
+    return env
+
+
+def rename_videos(video_dir, results):
+    """<index>.mp4 -> episode_<index>_<success|fail>.mp4; returns the new paths."""
+    renamed = []
+    for r in results:
+        src = Path(video_dir) / f"{r['episode']}.mp4"
+        if not src.exists():
+            continue
+        dst = src.with_name(f"episode_{r['episode']:03d}_{'success' if r['success'] else 'fail'}.mp4")
+        src.rename(dst)
+        renamed.append(dst)
+    return renamed
 
 
 def to_bool(x):
@@ -69,13 +101,7 @@ def main(args):
     control_mode = args.control_mode or env_info.get("control_mode", "pd_joint_delta_pos")
     print(f"env_id={env_id} control_mode={control_mode}")
 
-    env = gym.make(
-        env_id,
-        obs_mode="state_dict+rgb",
-        control_mode=control_mode,
-        render_mode="rgb_array" if args.render else None,
-        max_episode_steps=args.max_steps,
-    )
+    env = make_env(env_id, control_mode, args.max_steps, args.video_dir)
     act_dim = env.action_space.shape[-1]
 
     results = []
@@ -84,10 +110,11 @@ def main(args):
             obs, info = env.reset(seed=args.seed + ep)
             policy.reset()
             obs["actions"] = torch.zeros((1, act_dim))
+            policy.observe(obs)
             executed = {"qpos": [], "qvel": [], "actions": []}
             success, steps, done = False, 0, False
             while not done:
-                plan = policy(obs)
+                plan = policy(obs, observe=False)  # history already holds obs
                 actions = plan["actions"][:, : policy.action_horizon]
                 for i in range(actions.shape[1]):
                     action = actions[:, i].detach().cpu()
@@ -96,9 +123,8 @@ def main(args):
                     executed["actions"].append(action.float())
                     obs, _, terminated, truncated, info = env.step(action)
                     obs["actions"] = action
+                    policy.observe(obs)
                     steps += 1
-                    if args.render:
-                        env.render_human()
                     success = success or to_bool(info.get("success", False))
                     if success or to_bool(terminated) or to_bool(truncated):
                         done = True
@@ -118,6 +144,8 @@ def main(args):
         print("KeyboardInterrupt: summarising finished episodes")
     finally:
         env.close()
+    if args.video_dir:
+        rename_videos(args.video_dir, results)
 
     if not results:
         return
@@ -150,12 +178,15 @@ if __name__ == "__main__":
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=500)
-    parser.add_argument("--action-horizon", type=int, default=1)
+    parser.add_argument(
+        "--action-horizon", type=int, default=None,
+        help="actions executed per plan; defaults to config evaluation.action_horizon (or 1)",
+    )
     parser.add_argument("--env-id", default=None, help="defaults to the dataset's env_id")
     parser.add_argument("--control-mode", default=None, help="defaults to the dataset's control_mode")
     parser.add_argument("--constraint-eta", type=float, default=None)
     parser.add_argument("--project-final", action="store_true")
     parser.add_argument("--guidance-scale", type=float, default=None)
-    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--video-dir", default=None, help="record one mp4 per episode here")
     parser.add_argument("--output", default=None)
     main(parser.parse_args())
