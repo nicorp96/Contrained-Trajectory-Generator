@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from common.get_class import get_class_dict
 from common.inpainting import apply_inpainting, make_inpainting_mask
@@ -19,6 +18,7 @@ from models.utils.encoders_robot import (
     unfreeze_hf_last_n,
 )
 from models.utils.guidance_robot import BaseGuidance, to_physical
+from models.utils.noise_scheduler import build_noise_scheduler
 from models.utils.robot_constraints import RobotConstraints
 from trainer.base_trainer import BaseTrainer
 
@@ -166,17 +166,7 @@ class DiffusionTrainer(BaseTrainer):
 
     def setup_scheduler(self):
         super().setup_scheduler()
-        scheduler_cfg = self.config["model"]["noise_scheduler"]
-        self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=scheduler_cfg["num_train_timesteps"],
-            beta_start=scheduler_cfg["beta_start"],
-            beta_end=scheduler_cfg["beta_end"],
-            beta_schedule=scheduler_cfg["beta_schedule"],
-            clip_sample=scheduler_cfg["clip_sample"],
-            set_alpha_to_one=scheduler_cfg["set_alpha_to_one"],
-            steps_offset=scheduler_cfg["steps_offset"],
-            prediction_type=scheduler_cfg["prediction_type"],
-        )
+        self.noise_scheduler = build_noise_scheduler(self.config["model"]["noise_scheduler"])
 
     def setup_normalizer(self):
         if "path_stats" not in self.config["dataset"]:

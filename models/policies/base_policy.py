@@ -2,11 +2,11 @@ import os
 from pathlib import Path
 
 import torch
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from common.get_class import get_class_dict
 from common.utils import load_config
 from models.utils.guidance_robot import BaseGuidance
+from models.utils.noise_scheduler import build_noise_scheduler
 from models.utils.normalizer import DictNormalizer
 from models.utils.robot_constraints import RobotConstraints
 
@@ -19,6 +19,8 @@ class Policy:
       guidance:     dict overriding config["model"]["guidance"] (e.g. constraint_eta,
                     project_final, guidance_scale) for inference-time ablations
       constraints:  dict overriding config["constraints"]
+      scheduler:    dict overriding optional noise-scheduler entries (timestep_spacing, sampler)
+      num_inference_steps: DDIM steps instead of config["model"]["num_inference_steps"]
     """
 
     def __init__(self, ckpt_path, device, only_actions=True, **kwargs):
@@ -30,6 +32,7 @@ class Policy:
         self.config = None
         self.noise_scheduler = None
         self.normalizer_state, self.normalizer_goal, self.normalizer_obs = None, None, None
+        self.scheduler_overrides = kwargs.get("scheduler") or {}
         self.__load_ckp__(ckpt_path)
         self.setup_model()
         self.setup_scheduler()
@@ -47,7 +50,9 @@ class Policy:
             if constraints_cfg is not None
             else None
         )
-        self.num_inference_steps = self.config["model"]["num_inference_steps"]
+        self.num_inference_steps = int(
+            kwargs.get("num_inference_steps") or self.config["model"]["num_inference_steps"]
+        )
 
     def __load_ckp__(self, ckpt_path):
         checkpoint_path = Path(ckpt_path)
@@ -94,16 +99,8 @@ class Policy:
             normalizer.set_device(self.device)
 
     def setup_scheduler(self):
-        scheduler_cfg = self.config["model"]["noise_scheduler"]
-        self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=scheduler_cfg["num_train_timesteps"],
-            beta_start=scheduler_cfg["beta_start"],
-            beta_end=scheduler_cfg["beta_end"],
-            beta_schedule=scheduler_cfg["beta_schedule"],
-            clip_sample=scheduler_cfg["clip_sample"],
-            set_alpha_to_one=scheduler_cfg["set_alpha_to_one"],
-            steps_offset=scheduler_cfg["steps_offset"],
-            prediction_type=scheduler_cfg["prediction_type"],
+        self.noise_scheduler = build_noise_scheduler(
+            self.config["model"]["noise_scheduler"], **self.scheduler_overrides
         )
 
     def reset(self):

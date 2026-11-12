@@ -5,7 +5,8 @@ Closed-loop evaluation of a trained policy in ManiSkill.
 
 Reports success rate over seeded episodes plus physical-constraint violations of
 the executed joint trajectories; writes a JSON summary next to the checkpoint.
-Inference-time ablations: --constraint-eta, --project-final, --guidance-scale.
+Inference-time ablations: --constraint-eta, --project-final, --guidance-scale,
+--inference-steps, --timestep-spacing, --sampler.
 --video-dir records one mp4 per episode (episode_XXX_success|fail.mp4).
 """
 
@@ -106,6 +107,8 @@ def main(args):
         action_key="actions",
         action_horizon=args.action_horizon,
         guidance=guidance,
+        num_inference_steps=args.inference_steps,
+        scheduler={"timestep_spacing": args.timestep_spacing, "sampler": args.sampler},
     )
     env_info = dataset_env_info(policy.config)
     env_id = args.env_id or env_info.get("env_id", "PegInsertionSide-v1")
@@ -167,6 +170,9 @@ def main(args):
         "env_id": env_id,
         "control_mode": control_mode,
         "guidance": guidance,
+        "sampler": type(policy.noise_scheduler).__name__,
+        "num_inference_steps": policy.num_inference_steps,
+        "timestep_spacing": policy.noise_scheduler.config.timestep_spacing,
         "episodes": len(results),
         "success_rate": float(np.mean([r["success"] for r in results])),
         "mean_steps": float(np.mean([r["steps"] for r in results])),
@@ -200,6 +206,15 @@ if __name__ == "__main__":
     parser.add_argument("--constraint-eta", type=float, default=None)
     parser.add_argument("--project-final", action="store_true")
     parser.add_argument("--guidance-scale", type=float, default=None)
+    parser.add_argument("--inference-steps", type=int, default=None, help="DDIM steps (default: config)")
+    parser.add_argument(
+        "--timestep-spacing", choices=["leading", "trailing", "linspace"], default=None,
+        help="DDIM timestep spacing (default: config, else leading)",
+    )
+    parser.add_argument(
+        "--sampler", choices=["ddim", "ddpm"], default=None,
+        help="ddim: deterministic, ddpm: stochastic ancestral sampling (default: config, else ddim)",
+    )
     parser.add_argument("--video-dir", default=None, help="record one mp4 per episode here")
     parser.add_argument("--output", default=None)
     main(parser.parse_args())
