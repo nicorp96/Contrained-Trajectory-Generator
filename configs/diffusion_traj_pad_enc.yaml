@@ -5,7 +5,7 @@ start_indices: [0, 1, 2, 3, 4, 5 ,6 ,7, 8]
 
 model:
   target: models.diffusion_transformer.DiTTrjCC # DiTTrjCrossAtt
-  input_dim: 35        # qpos: 9 * 2, tcp pose: 7 *2
+  input_dim: 26        # qpos 9 + qvel 9 + actions 8
   cond_dim: 7         # TCP pose END
   diffusion_t_embed_dim: 256
   d_model: 256
@@ -13,7 +13,7 @@ model:
   n_blocks: 3
   dropout: 0.1
   history: True
-  history_shape: 1571
+  history_shape: 1562  # 26 + 2 cameras * 768 (dinov2-base)
   time_encoder: False
   time_t_embed_dim: 256
   num_inference_steps: 25
@@ -103,7 +103,7 @@ dataset:
   state_shapes:
     qpos:
       shape: 9
-      method_norm: "sincos"
+      method_norm: "minmax"  # Panda joints never wrap; sincos compresses narrow joints
     qvel:
       shape: 9
       method_norm: "standard"
@@ -121,7 +121,7 @@ dataset:
   obs_shapes:
     qpos:
       shape: 9
-      method_norm: "sincos"
+      method_norm: "minmax"  # Panda joints never wrap; sincos compresses narrow joints
     qvel:
       shape: 9
       method_norm: "standard"
