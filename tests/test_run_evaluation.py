@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("mani_skill")
 
-from run_evaluation import camera_kwargs, make_env, rename_videos  # noqa: E402
+from run_evaluation import camera_kwargs, insertion_state, make_env, rename_videos  # noqa: E402
 
 ENV_ID = "PegInsertionSide-v1"
 CONTROL_MODE = "pd_joint_delta_pos"
@@ -79,6 +79,39 @@ def test_make_env_uses_dataset_cameras():
         assert all(cams[c]["rgb"].shape[1:3] == (48, 48) for c in cams)
     finally:
         env.close()
+
+
+def test_insertion_state_other_task_is_empty():
+    assert insertion_state(None, {"success": True}) == {}
+
+
+def test_insertion_state_at_reset():
+    env = make_env(ENV_ID, CONTROL_MODE, max_steps=5)
+    try:
+        env.reset(seed=0)
+        _, _, _, _, info = env.step(env.action_space.sample() * 0)
+        state = insertion_state(env, info)
+    finally:
+        env.close()
+    x, y, z = state["peg_head_at_hole"]
+    assert x < -state["peg_half_length"]  # peg still in front of the entrance
+    assert abs(state["peg_height"]) < 0.005  # lying on the table
+    clearance = state["hole_radius"] - state["peg_radius"]
+    assert clearance == pytest.approx(0.003, abs=1e-6)  # task definition
+
+
+def test_insertion_state_matches_success_check():
+    env = make_env(ENV_ID, CONTROL_MODE, max_steps=5)
+    try:
+        env.reset(seed=1)
+        base = env.unwrapped
+        base.peg.set_pose(base.goal_pose)  # peg head exactly at the hole centre
+        info = base.evaluate()
+        state = insertion_state(env, info)
+    finally:
+        env.close()
+    assert bool(info["success"][0])
+    assert max(abs(v) for v in state["peg_head_at_hole"]) < 1e-5
 
 
 def _wrapper_names(env):

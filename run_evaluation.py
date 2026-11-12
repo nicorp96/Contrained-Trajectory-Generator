@@ -82,6 +82,22 @@ def rename_videos(video_dir, results):
     return renamed
 
 
+def insertion_state(env, info):
+    """Peg head relative to the hole at the end of an episode, for miss analysis.
+    Hole frame of PegInsertionSide: x along the insertion axis (entrance at
+    -peg_half_length, success needs x >= -0.015), y sideways, z up; {} for other tasks."""
+    if "peg_head_pos_at_hole" not in info:
+        return {}
+    base = env.unwrapped
+    return {
+        "peg_head_at_hole": torch.as_tensor(info["peg_head_pos_at_hole"]).reshape(-1)[:3].tolist(),
+        "hole_radius": float(base.box_hole_radii[0]),
+        "peg_radius": float(base.peg_half_sizes[0, 2]),
+        "peg_half_length": float(base.peg_half_sizes[0, 0]),
+        "peg_height": float(base.peg.pose.p[0, 2] - base.peg_half_sizes[0, 2]),  # 0 = lying on the table
+    }
+
+
 def to_bool(x):
     return bool(torch.as_tensor(x).reshape(-1)[0].item())
 
@@ -147,6 +163,7 @@ def main(args):
                         break
 
             record = {"episode": ep, "seed": args.seed + ep, "success": success, "steps": steps}
+            record.update(insertion_state(env, info))
             if policy.constraints is not None:
                 traj = {
                     k: torch.stack(v, dim=1).to(policy.device)
