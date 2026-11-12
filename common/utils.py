@@ -14,6 +14,23 @@ def load_config(config_path):
         raise RuntimeError(f"Failed to load config from {config_path}: {e}")
 
 
+def apply_overrides(config: dict, overrides) -> dict:
+    """
+    Apply dotted overrides in place, e.g. ["dataset.path=/data/x.h5", "training.batch_size=32"].
+    Values are parsed as YAML (numbers, booleans, lists).
+    """
+    for item in overrides or []:
+        key, sep, raw = item.partition("=")
+        if not sep:
+            raise ValueError(f"override '{item}' must look like key.sub=value")
+        node = config
+        parts = key.strip().split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = yaml.safe_load(raw)
+    return config
+
+
 def normalized_width(spec: dict) -> int:
     """Number of channels a state key occupies in normalized space."""
     width = int(spec["shape"])

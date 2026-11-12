@@ -148,6 +148,8 @@ constraints:
   action_key: actions
   dt: 0.05                 # ManiSkill default control_freq = 20 Hz
   n_revolute: 7
+  # Panda URDF limits; fingers raised to 0.5 m/s (demos reach ~0.44)
+  qvel_max: [2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61, 0.5, 0.5]
   action_low: -1.0         # pd_joint_delta_pos: normalized actions in [-1, 1]
   action_high: 1.0
   action_delta_scale: 0.1  # rad per unit action (pd_joint_delta_pos arm range)

@@ -2,7 +2,7 @@ import argparse
 import os
 
 from common.get_class import get_class_dict
-from common.utils import load_config
+from common.utils import apply_overrides, load_config
 from global_parameters import ConfigGlobalP
 
 cfg_global_p = ConfigGlobalP()
@@ -15,6 +15,7 @@ def main(args):
             cfg_global_p.ROOT_DIR, "configs", args.config + ".yaml"
         )
         config = load_config(config_path)
+        apply_overrides(config, args.set)
         trainer = get_class_dict(config)
         trainer.train()
 
@@ -40,7 +41,13 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Trajectory Generator")
     parser.add_argument(
-        "-c", "--config", help="Name of config file", default="diffusion"
+        "-c", "--config", help="Name of config file", default="diffusion_traj_pad"
+    )
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        help="config override, e.g. --set dataset.path=/data/x.h5 (repeatable)",
     )
     args = parser.parse_args()
     main(args)
