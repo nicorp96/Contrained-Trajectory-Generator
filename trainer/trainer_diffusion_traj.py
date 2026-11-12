@@ -30,6 +30,16 @@ class ObservationEncoder(nn.Module):
         super().__init__()
         self.encoders = encoders
 
+    def train(self, mode=True):
+        """Only encoders with trainable parameters enter train mode: a frozen
+        BatchNorm must keep its statistics, or features differ between training
+        (batch statistics) and inference (running statistics)."""
+        super().train(mode)
+        for enc in self.encoders.values():
+            if not any(p.requires_grad for p in enc.parameters()):
+                enc.eval()
+        return self
+
     def forward(self, obs_dict):
         encoded = {}
         for key, value in obs_dict.items():
@@ -53,7 +63,13 @@ def build_image_encoders(config, for_inference=False) -> ObservationEncoder:
     for key, cfg in encoder_cfg.items():
         enc_type = cfg["type"].lower()
         if enc_type == "resnet18":
-            encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
+            encoder = ResNet18Encoder(
+                pretrained=cfg.get("pretrained", True),
+                norm=cfg.get("norm", "batch"),
+                pool=cfg.get("pool", "avg"),
+                num_keypoints=cfg.get("num_keypoints", 32),
+                center_crop=cfg.get("center_crop", True),
+            )
         elif enc_type in {"dinov2", "hf", "transformer"}:
             encoder = HFVisionEncoder(model_name=cfg["name"], pool=cfg.get("pool", "cls"))
         elif enc_type == "none":
@@ -179,13 +195,7 @@ class DiffusionTrainer(BaseTrainer):
 
     def set_train_mode(self):
         self.model.train()
-        encoders_cfg = self.config["model"].get("image_encoders", {})
-        encoders = self.accelerator.unwrap_model(self.image_encoder_dict).encoders
-        for key, enc in encoders.items():
-            if encoders_cfg[key].get("trainable", False):
-                enc.train()
-            else:
-                enc.eval()
+        self.image_encoder_dict.train()  # frozen encoders stay in eval mode
 
     def set_eval_mode(self):
         self.model.eval()
