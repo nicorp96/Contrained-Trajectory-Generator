@@ -87,10 +87,10 @@ class Policy:
             self.normalizer_obs.load_stats(saved["normalizer_obs"])
         else:
             # older checkpoints: statistics from the dataset's stats file
-            from dataset.utils import get_ds_from_cfg
+            from dataset.utils import base_dataset, get_ds_from_cfg
 
             train_dataset, _ = get_ds_from_cfg(shapes)
-            base = getattr(train_dataset, "dataset", train_dataset)
+            base = base_dataset(train_dataset)
             self.normalizer_state, self.normalizer_goal, self.normalizer_obs = (
                 base.get_normalizers_from_file()
             )

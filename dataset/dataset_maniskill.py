@@ -54,7 +54,9 @@ class BaseDataset(Dataset):
                   + "mask" [L] (True = real step, False = padding) and "seq_len_L"
 
     The h5 file is opened lazily per process (DataLoader workers) and only the
-    required slices are read.
+    required slices are read. Dataset handles are looked up once per process and
+    reused: every h5py path lookup leaks ~0.25 KB inside HDF5, which over ~1e8
+    samples (samples_per_episode) filled 125 GB of RAM.
     """
 
     def __init__(self, config, dtype=torch.float32):
@@ -65,6 +67,7 @@ class BaseDataset(Dataset):
             _resolve_path(config["path_stats"]) if "path_stats" in config else None
         )
         self._h5 = None
+        self._handles = {}
 
         self.json_data = load_json(self.h5_path.replace(".h5", ".json"))
         self.env_info = self.json_data["env_info"]
@@ -106,13 +109,30 @@ class BaseDataset(Dataset):
     @property
     def h5(self):
         if self._h5 is None:
-            self._h5 = h5py.File(self.h5_path, "r")
+            # no chunk cache: each window is read once anyway, and every cached
+            # handle (_dset) would otherwise keep up to 1 MB of decompressed chunks
+            self._h5 = h5py.File(self.h5_path, "r", rdcc_nbytes=0)
         return self._h5
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_h5"] = None
+        state["_handles"] = {}
         return state
+
+    def _dset(self, ep_id, key, image_type="rgb"):
+        """Dataset `key` of episode `ep_id`, looked up once per process."""
+        handle_key = (ep_id, key, image_type)
+        if handle_key not in self._handles:
+            traj = self.h5[f"traj_{ep_id}"]
+            self._handles[handle_key] = self.find_dataset(traj, key, image_type)
+        return self._handles[handle_key]
+
+    def _length(self, ep_id):
+        """Number of actions of episode `ep_id` (cached like the handles)."""
+        if ("len", ep_id) not in self._handles:
+            self._handles[("len", ep_id)] = self._dset(ep_id, "actions").shape[0]
+        return self._handles[("len", ep_id)]
 
     def get_normalizers_from_file(self):
         with open(self.stats_path, "r") as f:
@@ -136,32 +156,31 @@ class BaseDataset(Dataset):
         raise KeyError(f"Key '{key}' not found in {traj.name}")
 
     def _episode(self, idx):
-        eps = self.episodes[idx]
-        traj = self.h5[f"traj_{eps['episode_id']}"]
-        eps_len = traj["actions"].shape[0]
+        ep_id = self.episodes[idx]["episode_id"]
+        eps_len = self._length(ep_id)
         # torch RNG is seeded per DataLoader worker
         high = max(eps_len - 2, 1)
         start_idx = int(torch.randint(0, high, (1,)).item())
-        return traj, eps_len, start_idx
+        return ep_id, eps_len, start_idx
 
-    def _goals(self, traj, eps_len):
+    def _goals(self, ep_id, eps_len):
         goal_dict = {}
         for key in self.goal_shapes:
-            data = self.find_dataset(traj, key)
+            data = self._dset(ep_id, key)
             goal_dict[key] = torch.tensor(data[eps_len - 1], dtype=self.dtype)
         return goal_dict
 
-    def _history(self, traj, start_idx):
+    def _history(self, ep_id, start_idx):
         obs_dict = {}
         H = self.sequence_len_H
         for key, spec in self.obs_shapes.items():
             if key == self.action_key:
                 # actions already executed before t: a_{t-H} .. a_{t-1}
-                dset = self.find_dataset(traj, key)
+                dset = self._dset(ep_id, key)
                 window = history_window(dset, start_idx, H, pad_value=0)
                 obs_dict[key] = torch.tensor(window, dtype=self.dtype)
             elif "camera" in key:
-                dset = self.find_dataset(traj, key, spec.get("type", "rgb"))
+                dset = self._dset(ep_id, key, spec.get("type", "rgb"))
                 window = history_window(dset, start_idx + 1, H)  # [H, h, w, c]
                 # keep uint8; ImageNormalizer converts to float in [0, 1]
                 obs_dict[key] = torch.from_numpy(
@@ -169,7 +188,7 @@ class BaseDataset(Dataset):
                 )
             else:
                 # observations o_{t-H+1} .. o_t (includes the current step)
-                dset = self.find_dataset(traj, key)
+                dset = self._dset(ep_id, key)
                 window = history_window(dset, start_idx + 1, H)
                 obs_dict[key] = torch.tensor(window, dtype=self.dtype)
         return obs_dict
@@ -188,22 +207,22 @@ class TrajectoryPadDatasetHDF5(BaseDataset):
         return out
 
     def __getitem__(self, idx):
-        traj, eps_len, start_idx = self._episode(idx)
+        ep_id, eps_len, start_idx = self._episode(idx)
         # windows longer than sequence_len are truncated (sliding window)
         end_idx = min(eps_len, start_idx + self.sequence_len)
         seq_len_L = end_idx - start_idx
 
         state_dict = {}
         for key in self.state_shapes:
-            data = self.find_dataset(traj, key)[start_idx:end_idx]
+            data = self._dset(ep_id, key)[start_idx:end_idx]
             state_dict[key] = self.pad_tail(torch.tensor(data, dtype=self.dtype), key)
 
-        obs_dict = self._history(traj, start_idx)
+        obs_dict = self._history(ep_id, start_idx)
         mask = torch.zeros(self.sequence_len, dtype=torch.bool)
         mask[:seq_len_L] = True
         obs_dict["mask"] = mask
         obs_dict["seq_len_L"] = seq_len_L
-        return state_dict, self._goals(traj, eps_len), obs_dict
+        return state_dict, self._goals(ep_id, eps_len), obs_dict
 
 
 class TrajectoryKDatasetHDF5(BaseDataset):
@@ -220,10 +239,10 @@ class TrajectoryKDatasetHDF5(BaseDataset):
         self.time_key = config.get("time_key", "time")
 
     def __getitem__(self, idx):
-        traj, eps_len, start_idx = self._episode(idx)
-        t = np.asarray(self.find_dataset(traj, self.time_key)[start_idx:eps_len]).reshape(-1)
+        ep_id, eps_len, start_idx = self._episode(idx)
+        t = np.asarray(self._dset(ep_id, self.time_key)[start_idx:eps_len]).reshape(-1)
         parts = [
-            np.asarray(self.find_dataset(traj, key)[start_idx:eps_len]).reshape(
+            np.asarray(self._dset(ep_id, key)[start_idx:eps_len]).reshape(
                 eps_len - start_idx, -1
             )
             for key in self.state_shapes
@@ -234,7 +253,7 @@ class TrajectoryKDatasetHDF5(BaseDataset):
         Y = torch.from_numpy(out["X"]).to(self.dtype)
         state_dict = {k: Y[:, list(spec.cols)] for k, spec in self.schema.items()}
 
-        obs_dict = self._history(traj, start_idx)
+        obs_dict = self._history(ep_id, start_idx)
         obs_dict["mask"] = torch.ones(Y.shape[0], dtype=torch.bool)
         obs_dict["seq_len_L"] = Y.shape[0]
-        return state_dict, self._goals(traj, eps_len), obs_dict
+        return state_dict, self._goals(ep_id, eps_len), obs_dict

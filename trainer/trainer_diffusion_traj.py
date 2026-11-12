@@ -9,6 +9,7 @@ import torch.optim as optim
 from common.get_class import get_class_dict
 from common.inpainting import apply_inpainting, make_inpainting_mask
 from common.utils import split_trajectory
+from dataset.utils import base_dataset
 from models.utils.ema import EMA
 from models.utils.encoders_robot import (
     ResNet18Encoder,
@@ -171,7 +172,7 @@ class DiffusionTrainer(BaseTrainer):
     def setup_normalizer(self):
         if "path_stats" not in self.config["dataset"]:
             raise ValueError("dataset.path_stats (normalizer statistics) is required")
-        base = getattr(self.train_dataset, "dataset", self.train_dataset)
+        base = base_dataset(self.train_dataset)
         state_normalizer, goal_normalizer, obs_normalizer = (
             base.get_normalizers_from_file()
         )
