@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from torch.utils.data import random_split
 from common.get_class import get_class_dict
 
@@ -6,16 +7,21 @@ from common.get_class import get_class_dict
 def get_ds_from_cfg(config):
     """
     Get the dataset from the configuration dictionary.
+    The train/val split is seeded (config["split_seed"]) so it is identical
+    across runs, resumes and evaluation.
     :param config: Configuration dictionary
-    :return: Dataset object
+    :return: (train, val) datasets
     """
     ds_train = get_class_dict(config)
     ds_val = None
-    if config["val"]:
-        train_size = int((1.0 - config["val_ratio"]) * len(ds_train))
-        # TODO: Check if +1
-        val_size = int(config["val_ratio"] * len(ds_train)) +1
-        ds_train, ds_val = random_split(ds_train, [train_size, val_size])
+    if config.get("val", False):
+        n = len(ds_train)
+        val_size = max(1, int(round(config["val_ratio"] * n)))
+        train_size = n - val_size
+        generator = torch.Generator().manual_seed(int(config.get("split_seed", 0)))
+        ds_train, ds_val = random_split(
+            ds_train, [train_size, val_size], generator=generator
+        )
     return ds_train, ds_val
 
 

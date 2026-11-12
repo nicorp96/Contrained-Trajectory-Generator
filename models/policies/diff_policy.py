@@ -1,21 +1,18 @@
 from collections import deque
-from einops import repeat, rearrange
-import torch
-import torch.nn as nn
 import time
 
+import torch
+from einops import rearrange, repeat
 
-from common.utils import split_state_tensor
 from common.inpainting import apply_inpainting, make_inpainting_mask
+from common.utils import split_trajectory
 from models.policies.base_policy import Policy
-from models.utils.encoders_robot import (
-    ResNet18Encoder,
-    HFVisionEncoder,
-    freeze_all_parameters,
-)
+from trainer.trainer_diffusion_traj import build_image_encoders
 
 
 class TensorHistory:
+    """Rolling observation history; the first observation fills the whole buffer."""
+
     def __init__(self, H):
         self.H = H
         self.history = {}
@@ -23,25 +20,12 @@ class TensorHistory:
     def update(self, current_data: dict):
         for key, value in current_data.items():
             value = value.clone()
-
-            # remove batch dimension if it is always 1
-            if value.shape[0] == 1:
+            if value.shape[0] == 1:  # drop batch dim of size 1
                 value = value.squeeze(0)
-
             if key not in self.history:
-                self.history[key] = deque(
-                    [value.clone() for _ in range(self.H)],
-                    maxlen=self.H,
-                )
-
-        for key, q in self.history.items():
-            if key in current_data:
-                value = current_data[key].clone()
-                if value.shape[0] == 1:
-                    value = value.squeeze(0)
-                q.append(value)
+                self.history[key] = deque([value.clone() for _ in range(self.H)], maxlen=self.H)
             else:
-                q.append(q[-1].clone())
+                self.history[key].append(value)
 
     def get_stacked(self):
         return {
@@ -50,283 +34,148 @@ class TensorHistory:
 
 
 class DiffPolicy(Policy):
+    """
+    Receding-horizon policy: at each call, sample a future trajectory starting at the
+    current state and return its first `action_horizon` actions.
+
+    obs must contain the ManiSkill observation dict plus obs["actions"]: the last
+    executed action (zeros at the first step), matching the training history.
+    """
+
     def __init__(self, config, device, only_actions=True, **kwargs):
         super().__init__(config, device, only_actions, **kwargs)
-        self.action_key = (
-            kwargs["action_key"] if "action_key" in kwargs.keys() else "actions"
-        )
-        self.action_horizon = (
-            kwargs["action_horizon"] if "action_horizon" in kwargs.keys() else 1
-        )
+        self.action_key = kwargs.get("action_key", "actions")
+        self.action_horizon = int(kwargs.get("action_horizon", 1))
+        self.verbose = bool(kwargs.get("verbose", False))
+        self.reset()
+
+    def reset(self):
         self.contex_history = TensorHistory(self.config["dataset"]["sequence_hist"])
 
-    def get_dict_from_obs(self, obs, key):
-        data = None
+    @staticmethod
+    def get_dict_from_obs(obs, key):
         if key in obs:
-            data = obs[key]
-        else:
-            for obs_key in obs.keys():
-                if obs_key == "sensor_param":
-                    continue
-
-                if key in obs[obs_key].keys():
-                    data = obs[obs_key][key]
-                    break
-        if data is None:
-            print(f"Key {key} not found in obs")
-        return data
+            return obs[key]
+        for obs_key, group in obs.items():
+            if obs_key == "sensor_param" or not isinstance(group, dict):
+                continue
+            if key in group:
+                return group[key]
+        raise KeyError(f"Key {key} not found in obs")
 
     def get_states_from_obs(self, obs):
+        """Current state repeated over the horizon (shape template + inpainting values)."""
         out = {}
-        shapes_dict = self.config["dataset"]["state_shapes"]
-        for key in shapes_dict.keys():
-            data = self.get_dict_from_obs(obs, key)
-            if key == self.action_key:
-                data = self.get_dict_from_obs(
-                    obs, key
-                )  # [:, : shapes_dict[key]["shape"]]
-                # data[:, -1] = 1.0
-            data_zeros = repeat(
-                data, "B D -> B L D", L=self.sequence_len
-            )  # torch.zeros((1, self.sequence_len, shapes_dict[key]["shape"]))
-            # data_zeros[:, -1, :] = data
-            out[key] = data_zeros
+        for key in self.config["dataset"]["state_shapes"].keys():
+            data = self.get_dict_from_obs(obs, key).float()
+            out[key] = repeat(data, "B D -> B L D", L=self.sequence_len)
         return out
 
     def get_goal_from_obs(self, obs):
-        out = {}
-        shapes_dict = self.config["dataset"]["goal_shapes"]
-        for key in shapes_dict.keys():
-            data = self.get_dict_from_obs(obs, key)
-            out[key] = data
-        return out
+        return {
+            key: self.get_dict_from_obs(obs, key).float()
+            for key in self.config["dataset"]["goal_shapes"].keys()
+        }
 
     def get_context_from_obs(self, obs):
         out = {}
-        shapes_dict = self.config["dataset"]["obs_shapes"]
-        sequence_hist = self.config["dataset"]["sequence_hist"]
-        for key in shapes_dict.keys():
+        obs_shapes = self.config["dataset"].get("obs_shapes") or {}
+        for key, spec in obs_shapes.items():
             data = self.get_dict_from_obs(obs, key)
-            if key == self.action_key:
-                data = self.get_dict_from_obs(obs, key)
             if "camera" in key:
-                data = data["rgb"]
-                data = rearrange(data, "B H W C -> B C H W")
-                # data_zeros = repeat(data, "B C H W -> B L C H W", L=sequence_hist)
-                # data_zeros[:, -1, :, :, :] = data
-            # else:
-            # data_zeros = torch.zeros((1, sequence_hist, shapes_dict[key]["shape"]))
-            # data_zeros[:, -1, :] = data
-            out[key] = data  # _zeros
+                data = rearrange(data[spec.get("type", "rgb")], "B H W C -> B C H W")
+            else:
+                data = data.float()
+            out[key] = data
         return out
 
-    def get_states_goal_extra_from_obs(self, obs):
-        states_dict = self.get_states_from_obs(obs)
-        goals_dict = self.get_goal_from_obs(obs)
-        context = self.get_context_from_obs(obs)
-        self.contex_history.update(context)
-        return states_dict, goals_dict
+    def encode_history(self, history_dict_nm):
+        return history_dict_nm
 
-    @torch.inference_mode()
-    def conditional_sample(self, states_norm_dict, goals_norm, history_dict_nm, device):
+    @torch.no_grad()
+    def conditional_sample(self, states_norm_dict, goals_norm, history_dict_nm):
+        # no_grad (not inference_mode) so constraint guidance can use autograd
+        device = self.device
         model = self.ema_model if self.ema_model is not None else self.model
-        inpt = self.inpainting
-        guidance_algo = self.guidance_algo
         scheduler = self.noise_scheduler
-        trj = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        cond = torch.cat(
-            [goals_norm[key] for key in goals_norm.keys()],
-            dim=1,
-        ).to(device)
-
-        trajectory_history = torch.cat(
-            [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
-            dim=2,
+        trj = torch.cat([states_norm_dict[k] for k in states_norm_dict], dim=2).to(device)
+        cond = torch.cat([goals_norm[k] for k in goals_norm], dim=1).to(device)
+        state_hist = torch.cat(
+            [history_dict_nm[k].to(device).float() for k in history_dict_nm], dim=2
         )
-        mask_inp = make_inpainting_mask(
-            trajectory=trj,
-            start_indices=self.start_indices,
-            goal_indices=self.goal_indices,
-        )
-
-        trajectory_n = torch.randn(size=trj.shape, dtype=trj.dtype, device=trj.device)
-
-        scheduler.set_timesteps(self.num_inference_steps, device=trj.device)
-
-        if cond is None:
-            raise ValueError(
-                "cond is required for CFG (set guidance_scale=1.0 to disable)."
+        mask_known = (
+            make_inpainting_mask(
+                trajectory=trj,
+                start_indices=self.start_indices,
+                goal_indices=self.goal_indices,
             )
-        if inpt:
-            trajectory_n = apply_inpainting(trajectory_n, mask_inp, trj, noise=False)
+            if self.inpainting
+            else None
+        )
+        kwargs = {
+            "state_hist": state_hist,
+            "mask_known": mask_known,
+            "constraints": self.constraints,
+            "normalizer_state": self.normalizer_state,
+            "state_shapes": self.config["dataset"]["state_shapes"],
+        }
+
+        scheduler.set_timesteps(self.num_inference_steps, device=device)
+        x = torch.randn(size=trj.shape, dtype=trj.dtype, device=device)
+        if mask_known is not None:
+            x = apply_inpainting(x, mask_known, trj, noise=False)
         for k in scheduler.timesteps:
-            trajectory_n = guidance_algo(
-                input_noised=trajectory_n,
-                k=k,
-                cond=cond,
-                scheduler=scheduler,
-                model=model,
-                state_hist=trajectory_history,
+            x = self.guidance_algo(
+                input_noised=x, k=k, cond=cond, scheduler=scheduler, model=model, **kwargs
             )
-            if inpt:
-                trajectory_n = apply_inpainting(
-                    trajectory_n, mask_inp, trj, noise=False
-                )
-        return trajectory_n
+            if mask_known is not None:
+                x = apply_inpainting(x, mask_known, trj, noise=False)
+        x = self.guidance_algo.finalize(x, **kwargs)
+        if mask_known is not None:
+            x = apply_inpainting(x, mask_known, trj, noise=False)
+        return x
 
     def __call__(self, obs):
-        states_dict, goals_dict = self.get_states_goal_extra_from_obs(obs)
-        device = self.device
-        ctx_hist = self.contex_history.get_stacked()
-        # Normalize
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        history_dict_nm = self.normalizer_obs(ctx_hist)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        states_dict = self.get_states_from_obs(obs)
+        goals_dict = self.get_goal_from_obs(obs)
+        self.contex_history.update(self.get_context_from_obs(obs))
+
+        states_norm_dict = self.normalizer_state(
+            {k: v.to(self.device) for k, v in states_dict.items()}
+        )
+        goals_norm = self.normalizer_goal({k: v.to(self.device) for k, v in goals_dict.items()})
+        ctx_hist = {k: v.to(self.device) for k, v in self.contex_history.get_stacked().items()}
+        history_dict_nm = self.encode_history(self.normalizer_obs(ctx_hist))
+
         t0 = time.perf_counter()
+        out_trj = self.conditional_sample(states_norm_dict, goals_norm, history_dict_nm)
+        if self.verbose:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            print(f"conditional_sample: {(time.perf_counter() - t0) * 1000:.1f} ms")
 
-        out_trj = self.conditional_sample(
-            states_norm_dict, goals_norm, history_dict_nm, device=device
-        )
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t1 = time.perf_counter()
-
-        print(f"conditional_sample: {(t1 - t0) * 1000:.3f} ms")
-
-        output_dict = split_state_tensor(
-            out_trj, self.config["dataset"]["state_shapes"]
-        )
-        output_unnormalized = self.normalizer_state.unnormalize(output_dict)
+        with torch.no_grad():
+            output = self.normalizer_state.unnormalize(
+                split_trajectory(out_trj, self.config["dataset"]["state_shapes"])
+            )
         if self.only_actions:
-            output_unnormalized = output_unnormalized[self.action_key][
-                :, : self.action_horizon, :
-            ]
-        return output_unnormalized
+            return output[self.action_key][:, : self.action_horizon, :]
+        return output
 
 
 class DiffPolicyEncoder(DiffPolicy):
-    def __init__(self,  config, device, only_actions=True, **kwargs):
-        super().__init__( config, device, only_actions, **kwargs)
-
-    @staticmethod
-    def load_image_encoder(config, device=None):
-        encoder_cfg = config["model"].get("image_encoders", {})
-        encoder_dict = nn.ModuleDict()
-
-        for key, cfg in encoder_cfg.items():
-            enc_type = cfg["type"].lower()
-            if enc_type == "resnet18":
-                encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
-            elif enc_type in {"dinov2", "hf", "transformer"}:
-                encoder = HFVisionEncoder(
-                    model_name=cfg["name"],
-                    pool=cfg.get("pool", "cls"),
-                )
-            elif enc_type == "none":
-                encoder = nn.Identity()
-                encoder.output_dim = config["dataset"]["state_shapes"][key]["shape"][0]
-            else:
-                raise ValueError(f"Unsupported image encoder type: {enc_type}")
-
-            if enc_type != "none":
-                # freeze all first
-                freeze_all_parameters(encoder)
-            encoder.eval()
-            encoder_dict[key] = encoder
-
-        return encoder_dict
+    """DiffPolicy with image encoders (cameras in obs_shapes)."""
 
     def setup_model(self):
         super().setup_model()
-        # build encoders from config
-        self.image_encoder_dict = self.load_image_encoder(self.config)
-
-        # load encoder weights if present
-        enc_state = self.checkpoint["state_dicts"].get("image_encoders_state", None)
+        sd = self.checkpoint["state_dicts"]
+        self.image_encoder = build_image_encoders(self.config, for_inference=True)
+        # EMA encoder weights match the EMA diffusion model used for sampling
+        enc_state = sd.get("ema_image_encoders_state") or sd.get("image_encoders_state")
         if enc_state is not None:
-            self.image_encoder_dict.load_state_dict(enc_state)
+            self.image_encoder.load_state_dict(enc_state)
+        self.image_encoder = self.image_encoder.to(self.device).eval()
 
-        self.image_encoder_dict = self.image_encoder_dict.to(self.device)
-
-    @torch.inference_mode()
-    def encode_image_observations(self, obs_dict):
-        encoded = {}
-
-        for key, value in obs_dict.items():
-            if key in self.image_encoder_dict:
-                encoder = self.image_encoder_dict[key]
-
-                # value expected [B, L, C, H, W]
-                B, L, C, H, W = value.shape
-                x = value.reshape(B * L, C, H, W)
-
-                feat = encoder(x)
-
-                if feat.ndim == 4:
-                    feat = feat.flatten(1)
-
-                feat = feat.reshape(B, L, -1)
-                encoded[key] = feat
-            else:
-                encoded[key] = value
-
-        return encoded
-
-    def __call__(self, obs):
-        states_dict, goals_dict = self.get_states_goal_extra_from_obs(obs)
-        device = self.device
-        ctx_hist = self.contex_history.get_stacked()
-        # Normalize
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        history_dict_nm = self.normalizer_obs(ctx_hist)
-        history_dict_nm = self.encode_image_observations(history_dict_nm)
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-
-        out_trj = self.conditional_sample(
-            states_norm_dict, goals_norm, history_dict_nm, device=device
-        )
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t1 = time.perf_counter()
-
-        print(f"conditional_sample: {(t1 - t0) * 1000:.3f} ms")
-
-        output_dict = split_state_tensor(
-            out_trj, self.config["dataset"]["state_shapes"]
-        )
-        output_unnormalized = self.normalizer_state.unnormalize(output_dict)
-        if self.only_actions:
-            output_unnormalized = output_unnormalized[self.action_key][
-                :, : self.action_horizon, :
-            ]
-        return output_unnormalized
-
-
-
-if __name__ == "__main__":
-    config = {
-        "path_ckp": "/mnt/data_nrp/research_t_opt/logs/GCDiTDiff/20251216-111751/logs/checkpoint_1195.pth"
-    }
-    device = torch.device("cuda:0")
-    policy = DiffPolicy(config, device)
-    states = {
-        "desired_pos": torch.ones((1, 16, 2)),
-        "current_pos": torch.ones((1, 16, 2)),
-    }
-    actions = {"vel": torch.ones((1, 16, 2))}
-    environment = {
-        "goal": torch.ones((1, 2)),
-    }
-    out = policy(states, actions, environment)
-    print(out.size())
+    @torch.no_grad()
+    def encode_history(self, history_dict_nm):
+        return self.image_encoder(history_dict_nm)

@@ -69,7 +69,6 @@ class ManiSkillTrajectoryDatasetRepro(Dataset):
         terminated = trajectory["terminated"]
         truncated = trajectory["truncated"]
         actions = common.to_tensor(actions, device=self.device)
-        obs = common.index_dict_array(obs, idx, inplace=False)
 
         res = dict(
             obs=obs,
@@ -99,6 +98,10 @@ class AddTCPPoseAndDeltaPose(gym.ObservationWrapper):
         self.prev_pose = None
         return super().reset(**kwargs)
 
+    def reset_delta(self):
+        """Call after setting the simulator state directly (e.g. set_state_dict)."""
+        self.prev_pose = None
+
     def _get_tcp_pose_vec(self):
         tcp_pose = self.env.unwrapped.agent.tcp.pose
         p = np.asarray(tcp_pose.p, dtype=np.float32)
@@ -110,8 +113,8 @@ class AddTCPPoseAndDeltaPose(gym.ObservationWrapper):
         p1, q1 = cur_pose[:3], cur_pose[3:]
 
         dp = p1 - p0
-        r0 = R.from_quat(q0)
-        r1 = R.from_quat(q1)
+        r0 = R.from_quat(q0, scalar_first=True)
+        r1 = R.from_quat(q1, scalar_first=True)
         drot = (r1 * r0.inv()).as_rotvec().astype(np.float32)
         return np.concatenate([dp, drot], axis=0)
 
@@ -140,10 +143,10 @@ class AddTCPPoseAndDeltaPose(gym.ObservationWrapper):
         qpos = self.env.unwrapped.agent.robot.get_qpos()
         finger_qpos = qpos[0, -2:]
 
-        # normalize to [0,1]
+        # mean finger opening in meters
         gripper = finger_qpos.mean().unsqueeze(0)
 
-        # full action vector (7)
+        # [dp (3), drot (3), gripper (1)]
         delta_pose = torch.tensor(delta_pose, dtype=torch.float32)
 
         # -------- SAVE TO OBS --------
@@ -209,15 +212,16 @@ if __name__ == "__main__":
         actions = data["actions"].numpy()
         states = data["env_states"]  # list/seq of dicts
         seed = data["seed"]
-        sd0 = common.to_numpy(states)  # initial state dict
-        # Optional: set exact sim state
         obs, info = env.reset(seed=int(seed))
         if states is not None:
-            env.unwrapped.set_state_dict(common.to_numpy(states))
-            if hasattr(env.unwrapped, "get_obs"):
-                obs = env.unwrapped.get_obs()
-        # recompute obs from the loaded state (reset obs is stale)
-        obs = env.unwrapped.get_obs() if hasattr(env.unwrapped, "get_obs") else obs
+            # restore the exact initial simulator state of the demo
+            env.unwrapped.set_state_dict(
+                common.to_tensor(common.index_dict_array(states, 0, inplace=False))
+            )
+            delta_wrapper = env
+            while not isinstance(delta_wrapper, AddTCPPoseAndDeltaPose):
+                delta_wrapper = delta_wrapper.env
+            delta_wrapper.reset_delta()
         done = False
         for action in actions:
             obs, rew, terminated, truncated, info = env.step(action)

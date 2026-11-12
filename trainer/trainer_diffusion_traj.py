@@ -1,21 +1,16 @@
 import copy
+import os
 
 import numpy as np
 import torch
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from einops import repeat
-import os
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from common.get_class import get_class_dict
 from common.inpainting import apply_inpainting, make_inpainting_mask
-from dataset.utils import get_ds_from_cfg
-from global_parameters import ConfigGlobalP
+from common.utils import split_trajectory
 from models.utils.ema import EMA
-from models.utils.guidance_robot import BaseGuidance, CFGGuidance
 from models.utils.encoders_robot import (
     ResNet18Encoder,
     HFVisionEncoder,
@@ -23,132 +18,135 @@ from models.utils.encoders_robot import (
     unfreeze_resnet_last_n,
     unfreeze_hf_last_n,
 )
+from models.utils.guidance_robot import BaseGuidance, to_physical
+from models.utils.robot_constraints import RobotConstraints
 from trainer.base_trainer import BaseTrainer
 
-cfg_gp = ConfigGlobalP()
+
+class ObservationEncoder(nn.Module):
+    """Encodes camera entries of an observation-history dict; other keys pass through."""
+
+    def __init__(self, encoders: nn.ModuleDict):
+        super().__init__()
+        self.encoders = encoders
+
+    def forward(self, obs_dict):
+        encoded = {}
+        for key, value in obs_dict.items():
+            if key in self.encoders:
+                # [B, L, C, H, W] -> [B, L, F]
+                B, L, C, H, W = value.shape
+                feat = self.encoders[key](value.reshape(B * L, C, H, W))
+                if feat.ndim == 4:
+                    feat = feat.flatten(1)
+                encoded[key] = feat.reshape(B, L, -1).float()
+            else:
+                encoded[key] = value
+        return encoded
+
+
+def build_image_encoders(config, for_inference=False) -> ObservationEncoder:
+    """Image encoders from config['model']['image_encoders'] (keyed by camera name)."""
+    encoder_cfg = config["model"].get("image_encoders", {})
+    encoder_dict = nn.ModuleDict()
+
+    for key, cfg in encoder_cfg.items():
+        enc_type = cfg["type"].lower()
+        if enc_type == "resnet18":
+            encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
+        elif enc_type in {"dinov2", "hf", "transformer"}:
+            encoder = HFVisionEncoder(model_name=cfg["name"], pool=cfg.get("pool", "cls"))
+        elif enc_type == "none":
+            encoder = nn.Identity()
+        else:
+            raise ValueError(f"Unsupported image encoder type: {enc_type}")
+
+        if enc_type != "none":
+            freeze_all_parameters(encoder)
+            if cfg.get("trainable", False) and not for_inference:
+                train_last_n = cfg.get("train_last_n", None)
+                if train_last_n is None:
+                    for p in encoder.parameters():
+                        p.requires_grad_(True)
+                elif enc_type == "resnet18":
+                    unfreeze_resnet_last_n(encoder, n=train_last_n)
+                else:
+                    unfreeze_hf_last_n(encoder, n=train_last_n)
+        encoder_dict[key] = encoder
+    return ObservationEncoder(encoder_dict)
 
 
 class DiffusionTrainer(BaseTrainer):
+    """
+    Goal- and history-conditioned trajectory diffusion for ManiSkill demos.
+
+    batch = (states, goals, obs) from dataset.dataset_maniskill:
+      states: future trajectory from t (diffused)        -> x0 [B, L, D]
+      goals:  goal quantities (CFG condition)            -> cond [B, G]
+      obs:    observation history (+ cameras) and mask   -> state_hist [B, H, F]
+    """
+
     def __init__(self, config):
-        super(DiffusionTrainer, self).__init__(config)
-        self.num_inference_steps = self.config["model"].get("num_inference_steps", 100)
+        self.num_inference_steps = config["model"].get("num_inference_steps", 100)
         self.goal_indices = config.get("goal_indices", None)
         self.start_indices = config.get("start_indices", None)
         self.inpainting = config.get("inpainting", True)
+        self.ema_encoders = None
+        self.constraints = None
+        super().__init__(config)
 
+    # ------------------------------------------------------------------ setup
     def prepare_all_accelerator(self):
-        (
-            self.model,
-            self.image_encoder_dict,
-            self.optimizer,
-            self.train_loader,
-            self.val_loader,
-        ) = self.accelerator.prepare(
-            self.model,
-            self.image_encoder_dict,
-            self.optimizer,
-            self.train_loader,
-            self.val_loader,
-        )
-
-    @staticmethod
-    def load_image_encoder(config, device=None):
-        encoder_cfg = config.get("image_encoders", {})
-        encoder_dict = nn.ModuleDict()
-
-        for key, cfg in encoder_cfg.items():
-            enc_type = cfg["type"].lower()
-            trainable = cfg.get("trainable", False)
-            train_last_n = cfg.get("train_last_n", None)
-
-            if enc_type == "resnet18":
-                encoder = ResNet18Encoder(pretrained=cfg.get("pretrained", True))
-
-            elif enc_type in {"dinov2", "hf", "transformer"}:
-                encoder = HFVisionEncoder(
-                    model_name=cfg["name"],
-                    pool=cfg.get("pool", "cls"),
-                )
-
-            elif enc_type == "none":
-                encoder = nn.Identity()
-                encoder.output_dim = config["dataset"]["state_shapes"][key]["shape"][0]
-
-            else:
-                raise ValueError(f"Unsupported image encoder type: {enc_type}")
-
-            if enc_type != "none":
-                # freeze all first
-                freeze_all_parameters(encoder)
-
-                if trainable:
-                    if train_last_n is None:
-                        # if user wants full finetuning
-                        for p in encoder.parameters():
-                            p.requires_grad_(True)
-                    else:
-                        if enc_type == "resnet18":
-                            unfreeze_resnet_last_n(encoder, n=train_last_n)
-                        else:
-                            unfreeze_hf_last_n(encoder, n=train_last_n)
-                    encoder.train()
-                else:
-                    encoder.eval()
-
-            encoder_dict[key] = encoder
-
-        return encoder_dict
-
-    def setup_optimizer(self):
-        training_config = self.config["training"]
-        optimizer_type = training_config["optimizer"]
-        learning_rate = training_config["learning_rate"]
-        encoder_lr = training_config.get("image_encoder_lr", learning_rate)
-
-        # model params
-        model_params = [p for p in self.model.parameters() if p.requires_grad]
-
-        # encoder params (only trainable ones)
-        encoder_params = []
-        if hasattr(self, "image_encoder_dict"):
-            for enc in self.image_encoder_dict.values():
-                encoder_params.extend([p for p in enc.parameters() if p.requires_grad])
-
-        param_groups = []
-
-        if model_params:
-            param_groups.append({"params": model_params, "lr": learning_rate})
-
-        if encoder_params:
-            param_groups.append({"params": encoder_params, "lr": encoder_lr})
-
-        # build optimizer
-        if optimizer_type.lower() == "adam":
-            self.optimizer = optim.Adam(param_groups)
-        elif optimizer_type.lower() == "sgd":
-            self.optimizer = optim.SGD(param_groups)
-        elif optimizer_type.lower() == "adamw":
-            self.optimizer = optim.AdamW(param_groups)
-        else:
-            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+        super().prepare_all_accelerator()
+        # DDP refuses modules without trainable parameters (frozen encoders)
+        if any(p.requires_grad for p in self.image_encoder_dict.parameters()):
+            self.image_encoder_dict = self.accelerator.prepare(self.image_encoder_dict)
 
     def setup_model(self):
-        self.model = get_class_dict(self.config["model"])
-        self.guidance_algo: BaseGuidance = get_class_dict(
-            self.config["model"]["guidance"]
-        )
-        assert torch.cuda.is_available()
-        if self.from_checkpoint:
-            self.model.load_state_dict(self.checkpoint["state_dicts"]["model_state"])
-        self.model.to(self.config["training"]["device"])
+        model_cfg = self.config["model"]
+        self.model = get_class_dict(model_cfg).to(self.device)
+        self.guidance_algo: BaseGuidance = get_class_dict(model_cfg["guidance"])
+        self.image_encoder_dict = build_image_encoders(self.config).to(self.device)
+        if "constraints" in self.config:
+            self.constraints = RobotConstraints(
+                self.config["constraints"], self.config["dataset"]["state_shapes"]
+            )
 
         if self.config["training"]["use_ema"]:
             self.ema_model = copy.deepcopy(self.model)
             self.ema = EMA(self.ema_model, self.config["ema"])
+            # trainable encoders get their own EMA so sampling uses matching weights
+            if any(p.requires_grad for p in self.image_encoder_dict.parameters()):
+                self.ema_encoders = EMA(
+                    copy.deepcopy(self.image_encoder_dict), self.config["ema"]
+                )
 
-        self.image_encoder_dict = self.load_image_encoder(
-            self.config["model"], self.accelerator.device
-        )
+    def setup_optimizer(self):
+        training_config = self.config["training"]
+        optimizer_type = training_config["optimizer"].lower()
+        learning_rate = training_config["learning_rate"]
+        encoder_lr = training_config.get("image_encoder_lr", learning_rate)
+
+        param_groups = [
+            {
+                "params": [p for p in self.model.parameters() if p.requires_grad],
+                "lr": learning_rate,
+            }
+        ]
+        encoder_params = [
+            p for p in self.image_encoder_dict.parameters() if p.requires_grad
+        ]
+        if encoder_params:
+            param_groups.append({"params": encoder_params, "lr": encoder_lr})
+
+        if optimizer_type == "adam":
+            self.optimizer = optim.Adam(param_groups)
+        elif optimizer_type == "sgd":
+            self.optimizer = optim.SGD(param_groups)
+        elif optimizer_type == "adamw":
+            self.optimizer = optim.AdamW(param_groups)
+        else:
+            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
 
     def setup_scheduler(self):
         super().setup_scheduler()
@@ -165,446 +163,136 @@ class DiffusionTrainer(BaseTrainer):
         )
 
     def setup_normalizer(self):
-        if "path_stats" in self.config["dataset"]:
-            state_normalizer, goal_normalizer, obs_normalizer = (
-                self.train_dataset.dataset.get_normalizers_from_file()
-            )
-        else:
-            state_normalizer, goal_normalizer, obs_normalizer = (
-                self.train_loader.get_normalizer_fit()
-            )
+        if "path_stats" not in self.config["dataset"]:
+            raise ValueError("dataset.path_stats (normalizer statistics) is required")
+        base = getattr(self.train_dataset, "dataset", self.train_dataset)
+        state_normalizer, goal_normalizer, obs_normalizer = (
+            base.get_normalizers_from_file()
+        )
         self.normalizer_state = state_normalizer
         self.normalizer_goal = goal_normalizer
         self.normalizer_obs = obs_normalizer
-        self.normalizers.append(state_normalizer)
-        self.normalizers.append(goal_normalizer)
-        self.normalizers.append(obs_normalizer)
+        self.normalizers = [state_normalizer, goal_normalizer, obs_normalizer]
         for normalizer in self.normalizers:
+            normalizer.to(self.device)
             normalizer.set_device(self.device)
-
-    def encode_image_observations(self, obs_dict):
-        encoded = {}
-
-        for key, value in obs_dict.items():
-            if key in self.image_encoder_dict:
-                encoder = self.image_encoder_dict[key]
-
-                # value expected [B, L, C, H, W]
-                B, L, C, H, W = value.shape
-                x = value.reshape(B * L, C, H, W)
-
-                feat = encoder(x)
-
-                if feat.ndim == 4:
-                    feat = feat.flatten(1)
-
-                feat = feat.reshape(B, L, -1)
-                encoded[key] = feat
-            else:
-                encoded[key] = value
-
-        return encoded
 
     def set_train_mode(self):
         self.model.train()
-        for key, enc in self.image_encoder_dict.items():
-            trainable = self.config["model"]["image_encoders"][key].get(
-                "trainable", False
-            )
-            if trainable:
+        encoders_cfg = self.config["model"].get("image_encoders", {})
+        encoders = self.accelerator.unwrap_model(self.image_encoder_dict).encoders
+        for key, enc in encoders.items():
+            if encoders_cfg[key].get("trainable", False):
                 enc.train()
             else:
                 enc.eval()
 
     def set_eval_mode(self):
         self.model.eval()
-        for key, enc in self.image_encoder_dict.items():
-            enc.eval()
+        self.image_encoder_dict.eval()
 
-    def save_checkpoint(self):
-        # sync before saving
-        self.accelerator.wait_for_everyone()
+    def update_ema(self):
+        super().update_ema()
+        if self.ema_encoders is not None:
+            self.ema_encoders.step(self.accelerator.unwrap_model(self.image_encoder_dict))
 
-        payload = {
-            "config": self.config,
-            "state_dicts": {
-                "model_state": self.accelerator.unwrap_model(self.model).state_dict(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "ema_state": (
-                    self.ema.model.state_dict() if self.ema is not None else None
-                ),
-                "image_encoders_state": self.accelerator.unwrap_model(
-                    self.image_encoder_dict
-                ).state_dict(),
-                "normalizer": {
-                    "normalizer_state": self.normalizer_state.state_dict(),
-                    "normalizer_goal": self.normalizer_goal.state_dict(),
-                    "normalizer_obs": self.normalizer_obs.state_dict(),
-                },
-            },
-            "global_step": int(self.global_step),
-            "epoch": int(self.epoch),
+    # ------------------------------------------------------------------ checkpoint
+    def checkpoint_state_dicts(self):
+        sd = super().checkpoint_state_dicts()
+        sd["image_encoders_state"] = self.accelerator.unwrap_model(
+            self.image_encoder_dict
+        ).state_dict()
+        sd["ema_image_encoders_state"] = (
+            self.ema_encoders.model.state_dict() if self.ema_encoders is not None else None
+        )
+        sd["normalizer"] = {
+            "normalizer_state": self.normalizer_state.state_dict(),
+            "normalizer_goal": self.normalizer_goal.state_dict(),
+            "normalizer_obs": self.normalizer_obs.state_dict(),
+        }
+        return sd
+
+    def load_checkpoint_into_state(self):
+        super().load_checkpoint_into_state()
+        sd = self.checkpoint["state_dicts"]
+        if sd.get("image_encoders_state") is not None:
+            self.accelerator.unwrap_model(self.image_encoder_dict).load_state_dict(
+                sd["image_encoders_state"]
+            )
+        if self.ema_encoders is not None and sd.get("ema_image_encoders_state"):
+            self.ema_encoders.model.load_state_dict(sd["ema_image_encoders_state"])
+
+    # ------------------------------------------------------------------ batch
+    def _prepare_batch(self, batch, use_ema_encoders=False):
+        device = self.device
+        states_dict, goals_dict, extra = batch
+        extra = dict(extra)
+        mask = extra.pop("mask", None)
+        extra.pop("seq_len_L", None)
+
+        states_norm = self.normalizer_state(states_dict)
+        trajectory = torch.cat([states_norm[k] for k in states_norm], dim=2).to(device)
+
+        goals_norm = self.normalizer_goal(goals_dict)
+        goal = torch.cat(
+            [v[:, 0, :] if v.ndim > 2 else v for v in goals_norm.values()], dim=1
+        ).to(device)
+
+        encoders = (
+            self.ema_encoders.model
+            if (use_ema_encoders and self.ema_encoders is not None)
+            else self.image_encoder_dict
+        )
+        history = encoders(self.normalizer_obs(extra))
+        history = torch.cat(
+            [history[k].to(device).float() for k in history], dim=2
+        )
+
+        mask = mask.to(device).bool() if mask is not None else None
+        mask_valid = mask if self.config["training"].get("mask_padding", True) else None
+        return {
+            "trajectory": trajectory.float(),
+            "goal": goal.float(),
+            "history": history,
+            "mask": mask,
+            "mask_valid": mask_valid,
+            "states_raw": states_dict,
         }
 
-        path = self._checkpoint_path()
-        # accelerator.save is safe in distributed; still only write once
-        if self.accelerator.is_main_process:
-            self.accelerator.save(payload, path)
-            self.logger.info(f"Saved checkpoint: {path}")
-
-        self.accelerator.wait_for_everyone()
-
-    def compute_loss(self, output, target, mask_valid=None):
-        # output, target: [B, M, D]
-        # mask_valid:     [B, M]  (True/1 = real token)
-        per_elem = (output - target) ** 2  # [B, M, D]
-        per_token = per_elem.mean(dim=-1)  # [B, M]
-
-        if mask_valid is not None:
-            mask = mask_valid.float()
-            loss = (per_token * mask).sum() / mask.sum().clamp_min(1.0)
-        else:
-            loss = per_token.mean()
-
-        return loss
-
-    def conditional_sample(
-        self, trj, cond, use_ema=True, generator=None, mask_inpt=None, **kwargs
-    ):
-        raise NotImplementedError()
-
-    def predict_trajectory(self, trj, cond, use_ema=False, **kwargs):
-        mask_inp = make_inpainting_mask(
-            trajectory=trj,
+    def _known_mask(self, trajectory):
+        if not self.inpainting:
+            return None
+        return make_inpainting_mask(
+            trajectory=trajectory,
             start_indices=self.start_indices,
             goal_indices=self.goal_indices,
         )
-        output_cd = self.conditional_sample(
-            trj, cond, use_ema=use_ema, mask_inpt=mask_inp, **kwargs
-        )
-        return {"output": output_cd, "target": trj}
 
-    def plotting(self, value_dict, step, epoch, name="val", unorm=True):
-        config = self.config["dataset"]["state_shapes"]
-        output_dict = self.split_state_tensor(value_dict["output"], config)
-        output_unnormalized = self.normalizer_state.unnormalize(output_dict)
-        target = value_dict["target_dict"]
-        for key in output_dict.keys():
-            output_np = output_unnormalized[key].detach().cpu().numpy()
-            target_np = target[key].detach().cpu().numpy()
-            batch_id = np.random.randint(0, output_np.shape[0])
-            seq_orig = output_np.shape[1]
-            seq_len_L_i = seq_orig  # seq_len_L[batch_id]
-
-            if key == "tcp_pose":
-                image_name = os.path.join(f"{name}_{key}", f"ep{epoch}")
-                out = output_np[batch_id, :seq_len_L_i, :3]
-                tgt = target_np[batch_id, :seq_len_L_i, :3]
-                img_np = self.plot_3d_trajectory(
-                    out,
-                    tgt,
-                    title=image_name,
-                )
-                self.writer.add_image(
-                    tag=image_name,
-                    global_step=step,
-                    img_tensor=img_np,
-                    dataformats="HWC",
-                )
-            for axis_idx in range(output_np.shape[-1]):
-                image_name = os.path.join(
-                    f"{name}_{key}_ax_{axis_idx}", f"epoch_{epoch}"
-                )
-                img_np = self.plot_1d_seq(
-                    output_np[batch_id, :seq_len_L_i, axis_idx],
-                    target_np[batch_id, :seq_len_L_i, axis_idx],
-                    title=image_name,
-                )
-                self.writer.add_image(
-                    tag=image_name,
-                    global_step=step,
-                    img_tensor=img_np,
-                    dataformats="HWC",
-                )
-
-
-class DiffusionTrajFullTrainer(DiffusionTrainer):
-    def __init__(self, config):
-        super().__init__(config)
-
-    @torch.no_grad()
-    def conditional_sample(
-        self, trj, cond, use_ema=True, generator=None, mask_inpt=None, **kwargs
-    ):
-        inpt = self.inpainting
-        guidance_algo = self.guidance_algo
-        # device = trj.device
-        # guidance_scale = (
-        #     None if "guidance_scale" not in kwargs.keys() else kwargs["guidance_scale"]
-        # )
-        model = (
-            self.ema_model if (use_ema and hasattr(self, "ema_model")) else self.model
-        )
-        model.eval()
+    def _diffusion_forward(self, prep):
         scheduler = self.noise_scheduler
+        trajectory = prep["trajectory"]
+        B = trajectory.shape[0]
+        device = trajectory.device
 
-        # gs = (
-        #     float(self.config["model"].get("guidance_scale", 1.0))
-        #     if guidance_scale is None
-        #     else float(guidance_scale)
-        # )
-
-        trajectory_n = torch.randn(
-            size=trj.shape, dtype=trj.dtype, device=trj.device, generator=generator
-        )
-        scheduler.set_timesteps(self.num_inference_steps, device=trj.device)
-
-        if cond is None:
-            raise ValueError(
-                "cond is required for CFG (set guidance_scale=1.0 to disable)."
-            )
-        if inpt:
-            trajectory_n = apply_inpainting(trajectory_n, mask_inpt, trj, noise=False)
-        for k in scheduler.timesteps:
-            # t_scalar = k  # scalar (HF timesteps tensor element)
-            trajectory_n = guidance_algo(
-                input_noised=trajectory_n,
-                k=k,
-                cond=cond,
-                scheduler=scheduler,
-                model=model,
-                **kwargs,
-            )
-            # trajectory_n = guide_and_step(trajectory_n, t_scalar)
-            if inpt:
-                trajectory_n = apply_inpainting(
-                    trajectory_n, mask_inpt, trj, noise=False
-                )
-        return trajectory_n
-
-    def train_step(self, batch):
-        device = self.device
-        scheduler = self.noise_scheduler
-        states_dict, goals_dict, extra_shapes = batch
-        start_pos = states_dict["position"][:, 0, :3]
-        goal_pos = goals_dict["pip_x_y_z_km"]
-        states_norm_dict = self.normalizer_state(
-            states_dict, start=start_pos, goal=goal_pos
-        )
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        cond_init = trajectory[:, 0, 3:]
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-
-        noise = torch.randn(trajectory.shape, device=device)
-        batch_size = trajectory.shape[0]
+        noise = torch.randn_like(trajectory)
         timesteps = torch.randint(
-            0,
-            self.noise_scheduler.config.num_train_timesteps,
-            (batch_size,),
-            device=device,
+            0, scheduler.config.num_train_timesteps, (B,), device=device
         ).long()
-        noisy_states = scheduler.add_noise(trajectory, noise, timesteps)
-        if self.inpainting:
-            mask_inp = make_inpainting_mask(
-                trajectory=trajectory,
-                start_indices=self.start_indices,
-                goal_indices=self.goal_indices,
-            )
-            noisy_states = apply_inpainting(
-                noisy_states, mask_inp, x_known=trajectory, noise=False
-            )
-        cond = torch.cat((goal_nm, cond_init), dim=1)
-        # ---------- Classifier-free dropout ----------
+        noisy = scheduler.add_noise(trajectory, noise, timesteps)
+        known = self._known_mask(trajectory)
+        if known is not None:
+            noisy = apply_inpainting(noisy, known, x_known=trajectory, noise=False)
+
+        # classifier-free dropout: the model swaps the goal for a learned null token
         cfg_p = float(self.config["model"].get("cfg_drop_prob", 0.0))
-        if cfg_p > 0.0:
-            B = cond.size(0)
-            drop_mask = (
-                torch.rand(B, 1, device=device) < cfg_p
-            ).float()  # 1 = drop -> unconditional
-            cond = cond * (1.0 - drop_mask)  # zeros become the "null" condition
+        cond_drop = torch.rand(B, device=device) < cfg_p if cfg_p > 0.0 else None
 
-        trj_noised_cond = noisy_states
-        pred = self.model(trj_noised_cond, timesteps, cond)  # , T_d)
-        pred_type = self.noise_scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            target = noise
-        elif pred_type == "sample":
-            target = trajectory
-        elif pred_type == "v_prediction":
-            target = self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss = self.compute_loss(pred, target)
-        return {"loss": loss}
-
-    def val_step(self, batch):
-        device = self.device
-        use_ema = self.ema_model is not None
-        states_dict, goals_dict, extra_shapes = batch
-        start_pos = states_dict["position"][:, 0, :3]
-        goal_pos = goals_dict["pip_x_y_z_km"]
-        states_norm_dict = self.normalizer_state(
-            states_dict, start=start_pos, goal=goal_pos
-        )
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        cond_init = trajectory[:, 0, 3:]
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-        cond = torch.cat((goal_nm, cond_init), dim=1)
-        out = self.predict_trajectory(trajectory, cond, use_ema=use_ema)
-        loss = self.compute_loss(out["output"], out["target"])
-        out["goal_pos"] = goal_pos
-        out["target_dict"] = states_dict
-        out.update({"loss": loss})
-        return out
-
-
-class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
-    def __init__(self, config):
-        super().__init__(config)
-
-    @torch.no_grad()
-    def conditional_sample(
-        self,
-        trj,
-        cond,
-        use_ema=True,
-        generator=None,
-        guidance_scale=None,
-        time=None,
-        mask_inpt=None,
-        **kwargs,
-    ):
-        inpt = self.inpainting
-        model = (
-            self.ema_model if (use_ema and hasattr(self, "ema_model")) else self.model
-        )
-        guidance_algo = self.guidance_algo
-        model.eval()
-        scheduler = self.noise_scheduler
-        kwargs["goal"] = trj[:, -1:, :3]
-        kwargs["normalizer_state"] = self.normalizer_state
-        kwargs["state_shapes"] = self.config["dataset"]["state_shapes"]
-
-        trajectory_n = torch.randn(
-            size=trj.shape, dtype=trj.dtype, device=trj.device, generator=generator
-        )
-
-        scheduler.set_timesteps(self.num_inference_steps, device=trj.device)
-
-        if cond is None:
-            raise ValueError(
-                "cond is required for CFG (set guidance_scale=1.0 to disable)."
-            )
-        if inpt:
-            trajectory_n = apply_inpainting(trajectory_n, mask_inpt, trj, noise=False)
-        for k in scheduler.timesteps:
-            trajectory_n = guidance_algo(
-                input_noised=trajectory_n,
-                k=k,
-                cond=cond,
-                scheduler=scheduler,
-                model=model,
-                **kwargs,
-            )
-            if inpt:
-                trajectory_n = apply_inpainting(
-                    trajectory_n, mask_inpt, trj, noise=False
-                )
-        return trajectory_n
-
-    def train_step(self, batch):
-        device = self.device
-        scheduler = self.noise_scheduler
-
-        states_dict, goals_dict, extra = batch
-
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-
-        B, L, D = trajectory.shape
-        if "mask" in extra.keys():
-            mask_valid = extra.pop("mask").to(device=device)
-        seq_len_L = (
-            extra.pop("seq_len_L")
-            if "seq_len_L" in extra.keys()
-            else self.config["dataset"].get("segment_horizon", 16)
-        )
-
-        mask_valid = None
-        mask_key_att = None  # ~mask_valid
-        history_dict_nm = self.normalizer_obs(extra)
-        history_dict_nm = self.encode_image_observations(history_dict_nm)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
-            dim=2,
-        )
-
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-
-        noise = torch.randn(trajectory.shape, device=device)
-        timesteps = torch.randint(
-            0,
-            scheduler.config.num_train_timesteps,
-            (B,),
-            device=device,
-        ).long()
-        cond = goal_nm
-        noisy_states = scheduler.add_noise(trajectory, noise, timesteps)
-        if self.inpainting:
-            mask_inp = make_inpainting_mask(
-                trajectory=trajectory,
-                start_indices=self.start_indices,
-                goal_indices=self.goal_indices,
-            )
-            noisy_states = apply_inpainting(
-                noisy_states, mask_inp, x_known=trajectory, noise=False
-            )
-        # ---------- Classifier-free dropout ----------
-        cfg_p = float(self.config["model"].get("cfg_drop_prob", 0.0))
-        if cfg_p > 0.0:
-            B = cond.size(0)
-            drop_mask = (
-                torch.rand(B, 1, device=device) < cfg_p
-            ).float()  # 1 = drop -> unconditional
-            cond = cond * (1.0 - drop_mask)  # zeros become the "null" condition
-        # (no change to model dims; we don't append an extra bit)
         pred = self.model(
-            noisy_states,
+            noisy,
             timesteps,
-            cond,
-            mask=mask_key_att,
-            state_hist=trajectory_history,
+            prep["goal"],
+            cond_drop=cond_drop,
+            state_hist=prep["history"],
         )
         pred_type = scheduler.config.prediction_type
         if pred_type == "epsilon":
@@ -615,634 +303,210 @@ class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
             target = scheduler.get_velocity(trajectory, noise, timesteps)
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
-        loss = self.compute_loss(pred, target, mask_valid)
+        return {
+            "pred": pred,
+            "target": target,
+            "noisy": noisy,
+            "timesteps": timesteps,
+            "known": known,
+        }
+
+    def compute_loss(self, output, target, mask_valid=None, mask_known=None):
+        """
+        MSE over real (non-padded) steps and over entries that are not inpainted.
+        output, target: [B, L, D]; mask_valid: [B, L] (True = real); mask_known: [B, L, D]
+        """
+        w = torch.ones_like(output, dtype=torch.float32)
+        if mask_valid is not None:
+            w = w * mask_valid.unsqueeze(-1).float()
+        if mask_known is not None:
+            w = w * (~mask_known.bool()).float()
+        err = (output.float() - target.float()) ** 2
+        return (err * w).sum() / w.sum().clamp_min(1.0)
+
+    # ------------------------------------------------------------------ steps
+    def train_step(self, batch):
+        prep = self._prepare_batch(batch)
+        fwd = self._diffusion_forward(prep)
+        loss = self.compute_loss(fwd["pred"], fwd["target"], prep["mask_valid"], fwd["known"])
         return {"loss": loss}
 
+    def guidance_kwargs(self, state_hist, mask_known):
+        return {
+            "state_hist": state_hist,
+            "mask_known": mask_known,
+            "constraints": self.constraints,
+            "normalizer_state": self.normalizer_state,
+            "state_shapes": self.config["dataset"]["state_shapes"],
+        }
+
+    @torch.no_grad()
+    def conditional_sample(
+        self, trj, cond, use_ema=True, state_hist=None, mask_known=None, generator=None
+    ):
+        model = (
+            self.ema_model
+            if (use_ema and self.ema_model is not None)
+            else self.accelerator.unwrap_model(self.model)
+        )
+        model.eval()
+        scheduler = self.noise_scheduler
+        scheduler.set_timesteps(self.num_inference_steps, device=trj.device)
+        kwargs = self.guidance_kwargs(state_hist, mask_known)
+
+        x = torch.randn(trj.shape, dtype=trj.dtype, device=trj.device, generator=generator)
+        if mask_known is not None:
+            x = apply_inpainting(x, mask_known, trj, noise=False)
+        for k in scheduler.timesteps:
+            x = self.guidance_algo(
+                input_noised=x, k=k, cond=cond, scheduler=scheduler, model=model, **kwargs
+            )
+            if mask_known is not None:
+                x = apply_inpainting(x, mask_known, trj, noise=False)
+        x = self.guidance_algo.finalize(x, **kwargs)
+        if mask_known is not None:
+            x = apply_inpainting(x, mask_known, trj, noise=False)
+        return x
+
     def val_step(self, batch):
-        device = self.device
         use_ema = self.ema_model is not None
-        states_dict, goals_dict, extra = batch
-
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        if "mask" in extra.keys():
-            mask_valid = extra.pop("mask").to(device=device)
-        seq_len_L = (
-            extra.pop("seq_len_L")
-            if "seq_len_L" in extra.keys()
-            else self.config["dataset"].get("segment_horizon", 16)
+        prep = self._prepare_batch(batch, use_ema_encoders=use_ema)
+        trajectory = prep["trajectory"]
+        known = self._known_mask(trajectory)
+        output = self.conditional_sample(
+            trajectory, prep["goal"], use_ema=use_ema, state_hist=prep["history"], mask_known=known
         )
-
-        mask_valid = None
-        history_dict_nm = self.normalizer_obs(extra)
-        history_dict_nm = self.encode_image_observations(history_dict_nm)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key].to(device) for key in history_dict_nm.keys()],
-            dim=2,
-        )
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-        cond = goal_nm
-        out = self.predict_trajectory(
-            trajectory,
-            cond,
-            use_ema=use_ema,
-            state_hist=trajectory_history,
-        )
-        loss = self.compute_loss(out["output"], out["target"], mask_valid)
-        out["target_dict"] = states_dict
-        out.update({"loss": loss})
-        out.update({"seq_len_L": seq_len_L})
+        loss = self.compute_loss(output, trajectory, prep["mask_valid"])
+        out = {
+            "output": output,
+            "target": trajectory,
+            "loss": loss,
+            "target_dict": prep["states_raw"],
+            "mask": prep["mask"],
+        }
+        if self.constraints is not None:
+            shapes = self.config["dataset"]["state_shapes"]
+            pred_phys = to_physical(output, self.normalizer_state, shapes)
+            gt_phys = {k: v.to(self.device).float() for k, v in prep["states_raw"].items()}
+            metrics = {
+                f"constraints_pred/{k}": v
+                for k, v in self.constraints.metrics(pred_phys, prep["mask"]).items()
+            }
+            # residuals of the demonstrations: calibrates dt / tolerances
+            metrics.update(
+                {
+                    f"constraints_gt/{k}": v
+                    for k, v in self.constraints.metrics(gt_phys, prep["mask"]).items()
+                }
+            )
+            out["metrics"] = metrics
         return out
 
+    # ------------------------------------------------------------------ plotting
     def plotting(self, value_dict, step, epoch, name="val"):
-        config = self.config["dataset"]["state_shapes"]
-        output_dict = self.split_state_tensor(value_dict["output"], config)
-        # # TODO: Test only (remove)
-        output_unnormalized = self.normalizer_state.unnormalize(output_dict)
+        shapes = self.config["dataset"]["state_shapes"]
+        with torch.no_grad():
+            output_unnormalized = self.normalizer_state.unnormalize(
+                split_trajectory(value_dict["output"].float(), shapes)
+            )
         target = value_dict["target_dict"]
-        # seq_len_L = value_dict["seq_len_L"]
-        # TODO: Remove when not needed
-        # start_pos = value_dict["start_pos"]
-        # target_unnormalized = self.normalizer_state.unnormalize(target)
-        for key in output_dict.keys():
-            output_np = output_unnormalized[key].detach().cpu().numpy()
-            target_np = target[key].detach().cpu().numpy()
-            batch_id = np.random.randint(0, output_np.shape[0])
-            seq_orig = output_np.shape[1]
-            seq_len_L_i = seq_orig  # seq_len_L[batch_id]
+        mask = value_dict.get("mask")
+        batch_id = np.random.randint(0, value_dict["output"].shape[0])
+        seq_len = (
+            int(mask[batch_id].sum().item())
+            if mask is not None
+            else value_dict["output"].shape[1]
+        )
+        for key in output_unnormalized.keys():
+            output_np = output_unnormalized[key][batch_id, :seq_len].detach().cpu().numpy()
+            target_np = target[key][batch_id, :seq_len].detach().cpu().numpy()
 
             if key == "tcp_pose":
                 image_name = os.path.join(f"{name}_{key}", f"ep{epoch}")
-                out = output_np[batch_id, :seq_len_L_i, :3]
-                tgt = target_np[batch_id, :seq_len_L_i, :3]
                 img_np = self.plot_3d_trajectory(
-                    out,
-                    tgt,
-                    title=image_name,
+                    output_np[:, :3], target_np[:, :3], title=image_name
                 )
                 self.writer.add_image(
-                    tag=image_name,
-                    global_step=step,
-                    img_tensor=img_np,
-                    dataformats="HWC",
+                    tag=image_name, global_step=step, img_tensor=img_np, dataformats="HWC"
                 )
-
-                # img_x = self.plot_1d_seq(
-                #     output_np[0, :seq_len_L_i, 0],
-                #     target_np[0, :seq_len_L_i, 0],
-                #     title=image_name + "_x",
-                # )
-                # self.writer.add_image(
-                #     img_tensor=img_x,
-                #     global_step=step,
-                #     dataformats="HWC",
-                #     tag=os.path.join(f"{name}_{key}_x", f"ep{epoch}_batch_{batch_id}"),
-                # )
-                # img_y = self.plot_1d_seq(
-                #     output_np[0, :seq_len_L_i, 1],
-                #     target_np[0, :seq_len_L_i, 1],
-                #     title=image_name + "_y",
-                # )
-                # self.writer.add_image(
-                #     img_tensor=img_y,
-                #     global_step=step,
-                #     dataformats="HWC",
-                #     tag=os.path.join(f"{name}_{key}_y", f"ep{epoch}_batch_{batch_id}"),
-                # )
-                # img_z = self.plot_1d_seq(
-                #     output_np[0, :seq_len_L_i, 2],
-                #     target_np[0, :seq_len_L_i, 2],
-                #     title=image_name + "_z",
-                # )
-                # self.writer.add_image(
-                #     img_tensor=img_z,
-                #     global_step=step,
-                #     dataformats="HWC",
-                #     tag=os.path.join(f"{name}_{key}_z", f"ep{epoch}_batch_{batch_id}"),
-                # )
-
             for axis_idx in range(output_np.shape[-1]):
-                image_name = os.path.join(
-                    f"{name}_{key}_ax_{axis_idx}", f"epoch_{epoch}"
-                )
+                image_name = os.path.join(f"{name}_{key}_ax_{axis_idx}", f"epoch_{epoch}")
                 img_np = self.plot_1d_seq(
-                    output_np[batch_id, :seq_len_L_i, axis_idx],
-                    target_np[batch_id, :seq_len_L_i, axis_idx],
-                    title=image_name,
+                    output_np[:, axis_idx], target_np[:, axis_idx], title=image_name
                 )
                 self.writer.add_image(
-                    tag=image_name,
-                    global_step=step,
-                    img_tensor=img_np,
-                    dataformats="HWC",
+                    tag=image_name, global_step=step, img_tensor=img_np, dataformats="HWC"
                 )
 
 
-class DiffusionTrajectoryPadHPhyITrainer(DiffusionTrajectoryPadHistTrainer):
+class DiffusionTrajectoryPhysTrainer(DiffusionTrainer):
+    """
+    Adds a physics-informed loss on the denoised estimate x0_hat:
+        loss = loss_diffusion + lambda * sum_b w_b * E_constraints(x0_hat_b) / sum_b w_b
+    with w_b = alpha_bar(t_b), so nearly pure-noise samples (meaningless x0_hat)
+    contribute almost nothing. Requires a `constraints` section in the config.
+
+    config:
+      physics_loss:
+        lambda: 0.1
+    """
+
     def __init__(self, config):
-        super(DiffusionTrajectoryPadHPhyITrainer, self).__init__(config)
-        self.lambda_phys = config.get("lambda_phys", 0.4)
-        self.loss_type = config.get("lambda_phys", "huber")
-        self.small_value = 1e-12
-        self.max_val_vel = config.get("max_val_vel", 1400)
-        self.min_val_vel = config.get("min_val_vel", 1.0)
-
-    @staticmethod
-    def residual_phys(
-        x0_hat,
-        pos_idx=(0, 1, 2),
-        vel_idx=(3, 4, 5),
-        dt=0.1,
-        loss_type="",
-        mask=None,
-    ):
-        """
-        x0_hat: (B, T, D) denoised trajectory estimate
-        """
-        device = x0_hat.device
-        pos_idx = torch.as_tensor(pos_idx, device=device, dtype=torch.long)
-        vel_idx = torch.as_tensor(vel_idx, device=device, dtype=torch.long)
-        p = x0_hat[:, :, pos_idx]  # (B,T,3)
-        v = x0_hat[:, :, vel_idx]  # (B,T,3)
-
-        dp = p[:, 1:] - p[:, :-1]  # (B,T-1,3)
-        vbar = 0.5 * (v[:, 1:] + v[:, :-1])  # (B,T-1,3)
-
-        if not torch.is_tensor(dt):
-            dt = torch.tensor(dt, device=device, dtype=x0_hat.dtype)
-        while dt.ndim < dp.ndim:
-            dt = dt.unsqueeze(-1)
-
-        r = dp - vbar * dt
-        denom = torch.tensor(1.0, device=device, dtype=x0_hat.dtype)
-        if mask is not None:
-            pair_mask = mask[:, 1:] * mask[:, :-1]  # (B,T-1)
-            pair_mask = pair_mask.unsqueeze(-1)  # (B,T-1,1)
-            r = r * pair_mask
-
-            # normalize by number of valid pairs (important!)
-            denom = pair_mask.sum().clamp_min(1.0)
-
-        if loss_type == "huber":
-            loss = F.huber_loss(
-                r,
-                torch.zeros_like(r),
-                delta=0.1,
-                reduction="sum",  # <-- sum, not mean
-            )
-        elif loss_type == "charbonnier":
-            loss = torch.sqrt(r.pow(2) + 1e-4).sum()
-        else:
-            loss = r.pow(2).sum()
-
-        return loss / denom
-
-    @staticmethod
-    def box_constraint_loss(x0_hat, value_min, value_max, idx=(0, 1, 2)):
-        # x_min, x_max can be scalars, [D], or broadcastable to [B,T,D]
-        device = x0_hat.device
-        value_max = torch.tensor(value_max, device=device, dtype=torch.float32)
-        value_min = torch.tensor(value_min, device=device, dtype=torch.float32)
-        idx = torch.as_tensor(idx, device=device, dtype=torch.long)
-        val = torch.norm(x0_hat[:, :, idx], p=2, dim=-1)
-        low = F.relu(value_min - val)
-        high = F.relu(val - value_max)
-        return (low**2 + high**2).mean()
-
-    def compute_physic_loss(self, x_t, denoiser_pred, k, d_t, mask=None):
-        """
-        For diffusers-style schedulers: x_t = sqrt(alphas_cumprod)*x0 + sqrt(1-alpha_cumprod)*eps
-        => x0 = (x_t - sqrt(1-a)*eps) / sqrt(a)
-        """
-        scheduler = self.noise_scheduler
-        normalizer_state = self.normalizer_state
-        state_shapes = self.config["dataset"]["state_shapes"]
-        pred_type = scheduler.config.prediction_type
-        x_0_hat = None
-        d_t = d_t.to(x_t.device)
-        if pred_type == "epsilon":
-            a = scheduler.alphas_cumprod[k].to(x_t.device)
-            if a.ndim == 0:
-                a = a.view(1)
-            if a.ndim < x_t.ndim:
-                a = a.unsqueeze(-1)
-            sqrt_a = a.sqrt()
-            sqrt_one_minus_a = (1.0 - a).sqrt()
-            x_0_hat = (x_t - sqrt_one_minus_a.unsqueeze(1) * denoiser_pred) / (
-                sqrt_a.unsqueeze(1) + self.small_value
-            )
-        elif pred_type == "sample":
-            x_0_hat = denoiser_pred
-
-        elif pred_type == "v_prediction":
-            alphas_cumprod = scheduler.alphas_cumprod.to(
-                device=x_t.device, dtype=x_t.dtype
-            )
-
-            a = alphas_cumprod[k]  # [B]
-            sqrt_a = torch.sqrt(a)  # [B]
-            sqrt_one_minus_a = torch.sqrt(1.0 - a)  # [B]
-
-            if sqrt_a.ndim < x_t.ndim:
-                sqrt_a = sqrt_a.unsqueeze(-1)
-                sqrt_one_minus_a = sqrt_one_minus_a.unsqueeze(-1)
-
-            x_0_hat = (
-                sqrt_a.unsqueeze(1) * x_t
-                - sqrt_one_minus_a.unsqueeze(1) * denoiser_pred
-            )
-        x_0_hat_dict = self.split_state_tensor(x_0_hat, state_shapes)
-        x_0_hat_unorm_dict = normalizer_state.unnormalize(x_0_hat_dict)
-        x_0_hat_phy = torch.cat(
-            [x_0_hat_unorm_dict[key] for key in x_0_hat_unorm_dict.keys()],
-            dim=2,
-        ).to(x_0_hat.device)
-        # Unormalized x_0_hat to -> physic space
-        loss_res = self.residual_phys(
-            x_0_hat_phy,
-            pos_idx=(0, 1, 2),
-            vel_idx=(3, 4, 5),
-            dt=d_t,
-            loss_type=self.loss_type,
-            mask=mask,
-        )
-        loss_constraints = self.box_constraint_loss(
-            x_0_hat_phy, self.min_val_vel, self.max_val_vel, idx=(3, 4, 5)
-        )
-        return loss_res + loss_constraints
-
-    def train_step(self, batch):
-        device = self.device
-        scheduler = self.noise_scheduler
-        lambda_phys = self.lambda_phys
-        states_dict, goals_dict, extra = batch
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-
-        B, L, D = trajectory.shape
-        # TODO: Remove if nor needed
-        mask_valid = extra.pop("mask").to(device=device)
-        seq_len_L = extra.pop("seq_len_L")
-        d_t = extra.pop("delta_t")[:, 0, :]
-        mask_valid = None
-        mask_key_att = None  # ~mask_valid
-        history_dict_nm = self.normalizer_obs(extra)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key] for key in history_dict_nm.keys()],
-            dim=2,
-        ).to(device)
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-
-        noise = torch.randn(trajectory.shape, device=device)
-        timesteps = torch.randint(
-            0,
-            scheduler.config.num_train_timesteps,
-            (B,),
-            device=device,
-        ).long()
-        cond = goal_nm
-        noisy_states = scheduler.add_noise(trajectory, noise, timesteps)
-        if self.inpainting:
-            mask_inp = make_inpainting_mask(
-                trajectory=trajectory,
-                start_indices=self.start_indices,
-                goal_indices=self.goal_indices,
-            )
-            noisy_states = apply_inpainting(
-                noisy_states, mask_inp, x_known=trajectory, noise=False
-            )
-        # ---------- Classifier-free dropout ----------
-        cfg_p = float(self.config["model"].get("cfg_drop_prob", 0.0))
-        if cfg_p > 0.0:
-            B = cond.size(0)
-            drop_mask = (
-                torch.rand(B, 1, device=device) < cfg_p
-            ).float()  # 1 = drop -> unconditional
-            cond = cond * (1.0 - drop_mask)  # zeros become the "null" condition
-        # (no change to model dims; we don't append an extra bit)
-        pred = self.model(
-            noisy_states,
-            timesteps,
-            cond,
-            mask=mask_key_att,
-            state_hist=trajectory_history,
-        )
-        pred_type = scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            target = noise
-        elif pred_type == "sample":
-            target = trajectory
-        elif pred_type == "v_prediction":
-            target = scheduler.get_velocity(trajectory, noise, timesteps)
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss_diff = self.compute_loss(pred, target, mask_valid)
-        loss_phys = self.compute_physic_loss(
-            noisy_states, pred, timesteps, d_t, mask_valid
-        )
-
-        a = scheduler.alphas_cumprod[timesteps].to(device)
-        w = a.mean()  # scalar weight (simple). You can also do per-sample weighting.
-        weighted_loss = w * loss_phys
-        loss = loss_diff + lambda_phys * weighted_loss  # .mean()
-        return {"loss": loss, "diff": loss_diff, "phys": loss_phys}
-
-    def val_step(self, batch):
-        device = self.device
-        use_ema = self.ema_model is not None
-        states_dict, goals_dict, extra = batch
-
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        # TODO: Remove if nor needed
-        mask_valid = extra.pop("mask").to(device)
-        d_t = extra.pop("delta_t")
-        seq_len_L = extra.pop("seq_len_L")
-        mask_valid = None
-        history_dict_nm = self.normalizer_obs(extra)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key] for key in history_dict_nm.keys()],
-            dim=2,
-        ).to(device)
-
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-        # mask_inp = torch.zeros_like(trajectory, dtype=torch.bool, device=device)
-        # mask_inp[:, :1, :] = torch.ones_like(
-        #     trajectory[:, :1, :], dtype=torch.bool, device=device
-        # )
-        # mask_inp[:, -1:, :3] = torch.ones_like(
-        #     trajectory[:, -1:, :3], dtype=torch.bool, device=device
-        # )
-
-        cond = goal_nm
-        out = self.predict_trajectory(
-            trajectory,
-            cond,
-            use_ema=use_ema,
-            state_hist=trajectory_history,
-        )
-        loss = self.compute_loss(out["output"], out["target"], mask_valid)
-        out["target_dict"] = states_dict
-        out.update({"loss": loss})
-        out.update({"seq_len_L": seq_len_L})
-        return out
-
-
-class DiffusionTrajectoryPadHistRSTrainer(DiffusionTrajectoryPadHistTrainer):
-    def __init__(self, config):
-        super(DiffusionTrajectoryPadHistRSTrainer, self).__init__(config)
-
-    @staticmethod
-    def effective_timestep(t_base, d, w_min=0.3, w_max=1.0):
-        """
-        t_base: (B,) int64 in [0, T-1]
-        d: (B,) distances
-        w_min: minimum warp factor for shortest distances
-        w_max: maximum warp factor for longest distances (usually 1.0)
-        returns: t_eff (B,) int64
-        """
-        # normalize d to [0,1] in the batch
-        d_norm = (d - d.min()) / (d.max() - d.min() + 1e-8)
-        # short (0) -> w_min, long (1) -> w_max
-        w = w_min + (w_max - w_min) * d_norm
-        t_eff = torch.clamp((w * t_base.float()).long(), min=0)
-        return t_eff
-
-    @torch.no_grad()
-    def conditional_sample(
-        self,
-        trj,
-        cond,
-        use_ema=True,
-        generator=None,
-        guidance_scale=None,
-        time=None,
-        mask_inpt=None,
-        **kwargs,
-    ):
-        model = (
-            self.ema_model if (use_ema and hasattr(self, "ema_model")) else self.model
-        )
-        guidance_algo = self.guidance_algo
-        inp = self.inpainting
-        model.eval()
-        scheduler = self.noise_scheduler
-        kwargs["normalizer_state"] = self.normalizer_state
-        kwargs["state_shapes"] = self.config["dataset"]["state_shapes"]
-        trajectory_n = torch.randn(
-            size=trj.shape, dtype=trj.dtype, device=trj.device, generator=generator
-        )
-
-        scheduler.set_timesteps(self.num_inference_steps, device=trj.device)
-
-        if cond is None:
-            raise ValueError(
-                "cond is required for CFG (set guidance_scale=1.0 to disable)."
-            )
-        if inp:
-            trajectory_n = apply_inpainting(trajectory_n, mask_inpt, trj, noise=False)
-        for k in scheduler.timesteps:
-            # k = self.effective_timestep(k, dist, w_min=0.4, w_max=1.0)
-            trajectory_n = guidance_algo(
-                input_noised=trajectory_n,
-                k=k,
-                cond=cond,
-                scheduler=scheduler,
-                model=model,
-                **kwargs,
-            )
-            if inp:
-                trajectory_n = apply_inpainting(
-                    trajectory_n, mask_inpt, trj, noise=False
-                )
-        return trajectory_n
-
-    def train_step(self, batch):
-        device = self.device
-        scheduler = self.noise_scheduler
-        states_dict, goals_dict, extra = batch
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        B, L, D = trajectory.shape
-        mask_valid = extra.pop("mask").to(device=device)
-        seq_len_L = extra.pop("seq_len_L")
-        mask_valid = None
-        mask_key_att = None  # ~mask_valid
-        history_dict_nm = self.normalizer_obs(extra)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key] for key in history_dict_nm.keys()],
-            dim=2,
-        ).to(device)
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-        noise = torch.randn(trajectory.shape, device=device)
-        timesteps = torch.randint(
-            0,
-            scheduler.config.num_train_timesteps,
-            (B,),
-            device=device,
-        ).long()
-        cond = goal_nm
-        noisy_states = scheduler.add_noise(trajectory, noise, timesteps)
-        if self.inpainting:
-            mask_inp = make_inpainting_mask(
-                trajectory=trajectory,
-                start_indices=self.start_indices,
-                goal_indices=self.goal_indices,
-            )
-            noisy_states = apply_inpainting(
-                noisy_states, mask_inp, x_known=trajectory, noise=False
-            )
-        # ---------- Classifier-free dropout ----------
-        cfg_p = float(self.config["model"].get("cfg_drop_prob", 0.0))
-        if cfg_p > 0.0:
-            B = cond.size(0)
-            drop_mask = (
-                torch.rand(B, 1, device=device) < cfg_p
-            ).float()  # 1 = drop -> unconditional
-            cond = cond * (1.0 - drop_mask)  # zeros become the "null" condition
-        # (no change to model dims; we don't append an extra bit)
-        pred = self.model(
-            noisy_states,
-            timesteps,
-            cond,
-            mask=mask_key_att,
-            state_hist=trajectory_history,
-        )
-        pred_type = scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            target = noise
-        elif pred_type == "sample":
-            target = trajectory
-        elif pred_type == "v_prediction":
-            target = scheduler.get_velocity(trajectory, noise, timesteps)
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss = self.compute_loss(pred, target, mask_valid)
-        return {"loss": loss}
-
-    def val_step(self, batch):
-        device = self.device
-        use_ema = self.ema_model is not None
-        states_dict, goals_dict, extra = batch
-        states_norm_dict = self.normalizer_state(states_dict)
-        goals_norm = self.normalizer_goal(goals_dict)
-        trajectory = torch.cat(
-            [states_norm_dict[key] for key in states_norm_dict.keys()],
-            dim=2,
-        ).to(device)
-        mask_valid = extra.pop("mask").to(device)
-        seq_len_L = extra.pop("seq_len_L")
-        mask_valid = None
-        history_dict_nm = self.normalizer_obs(extra)
-        trajectory_history = torch.cat(
-            [history_dict_nm[key] for key in history_dict_nm.keys()],
-            dim=2,
-        ).to(device)
-
-        goal_l = []
-        for value in goals_norm.values():
-            vlu = value
-            if value.ndim > 2:
-                vlu = value[:, 0, :]
-            goal_l.append(vlu)
-        goal_nm = torch.cat(goal_l, dim=1).to(device)
-        cond = goal_nm
-        out = self.predict_trajectory(
-            trajectory,
-            cond,
-            use_ema=use_ema,
-            state_hist=trajectory_history,
-        )
-        loss = self.compute_loss(out["output"], out["target"], mask_valid)
-        out["target_dict"] = states_dict
-        out.update({"loss": loss})
-        out.update({"seq_len_L": seq_len_L})
-        return out
-
-
-class DiffusionTrajectoryChunk(DiffusionTrajectoryPadHistTrainer):
-    def __init__(self, config):
+        self.lambda_phys = float(config.get("physics_loss", {}).get("lambda", 0.1))
         super().__init__(config)
+        if self.constraints is None:
+            raise ValueError(f"{type(self).__name__} needs a `constraints` config section")
 
-    def setup_dataloader(self):
-        ds_cfg = self.config["dataset"]
-        base_train, base_val = get_ds_from_cfg(ds_cfg)
+    def x0_from_prediction(self, pred, x_t, timesteps):
+        scheduler = self.noise_scheduler
+        a_bar = scheduler.alphas_cumprod.to(x_t.device)[timesteps].view(-1, 1, 1)
+        sqrt_ab, sqrt_1mab = a_bar.sqrt(), (1.0 - a_bar).sqrt()
+        pred_type = scheduler.config.prediction_type
+        if pred_type == "epsilon":
+            return (x_t - sqrt_1mab * pred) / sqrt_ab
+        if pred_type == "v_prediction":
+            return sqrt_ab * x_t - sqrt_1mab * pred
+        if pred_type == "sample":
+            return pred
+        raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        H = int(ds_cfg.get("segment_horizon", 16))
-        K = int(ds_cfg.get("segment_context", 4))
-        stride = ds_cfg.get("segment_stride", 4)  # H => non-overlap
-
-        self.train_dataset = TrajectorySegmentDataset(
-            base_train, horizon=H, context=K, stride=stride
-        )
-        self.validation_dataset = None
-        if ds_cfg.get("val", False) and base_val is not None:
-            self.validation_dataset = TrajectorySegmentDataset(
-                base_val, horizon=H, context=K, stride=stride
-            )
-
-        bs = self.config["training"]["batch_size"]
-        self.train_loader = DataLoader(self.train_dataset, batch_size=bs, shuffle=True)
-        self.val_loader = (
-            DataLoader(self.validation_dataset, batch_size=bs, shuffle=False)
-            if self.validation_dataset is not None
-            else None
+    def train_step(self, batch):
+        prep = self._prepare_batch(batch)
+        fwd = self._diffusion_forward(prep)
+        loss_diff = self.compute_loss(
+            fwd["pred"], fwd["target"], prep["mask_valid"], fwd["known"]
         )
 
-    def setup_normalizer(self):
-        if "path_stats" in self.config["dataset"]:
-            state_normalizer, goal_normalizer, normalizer_obs = (
-                self.train_dataset.base.get_normalizers_from_file()
-            )
-        else:
-            state_normalizer, goal_normalizer = (
-                self.train_loader.base.get_normalizer_fit()
-            )
-        self.normalizer_state = state_normalizer
-        self.normalizer_goal = goal_normalizer
-        self.normalizer_obs = normalizer_obs
-        self.normalizers.append(state_normalizer)
-        self.normalizers.append(goal_normalizer)
-        self.normalizers.append(normalizer_obs)
+        x0_hat = self.x0_from_prediction(
+            fwd["pred"].float(), fwd["noisy"].float(), fwd["timesteps"]
+        )
+        if fwd["known"] is not None:
+            x0_hat = torch.where(fwd["known"], prep["trajectory"], x0_hat)
+        phys = to_physical(
+            x0_hat, self.normalizer_state, self.config["dataset"]["state_shapes"]
+        )
+        # padded steps are never penalised, independent of mask_padding
+        terms = self.constraints.energy(phys, prep["mask"])
+
+        w = self.noise_scheduler.alphas_cumprod.to(x0_hat.device)[fwd["timesteps"]].float()
+        loss_phys = (w * terms["total"]).sum() / w.sum().clamp_min(1e-8)
+        loss = loss_diff + self.lambda_phys * loss_phys
+
+        out = {"loss": loss, "diff": loss_diff.detach(), "phys": loss_phys.detach()}
+        for name, value in terms.items():
+            if name != "total":
+                out[f"phys_{name}"] = value.mean().detach()
+        return out
+
+
+# Names used by existing configs
+class DiffusionTrajectoryPadHistTrainer(DiffusionTrainer):
+    pass
+
+
+class DiffusionTrajectoryPadHistRSTrainer(DiffusionTrainer):
+    pass
+
+
+class DiffusionTrajectoryPadHPhyITrainer(DiffusionTrajectoryPhysTrainer):
+    pass

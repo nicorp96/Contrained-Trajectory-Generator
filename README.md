@@ -124,16 +124,15 @@ Policies can be instantiated from checkpoints and used for inference in robotic 
 
 Supports various dataset formats:
 - `TrajectoryPadDatasetHDF5`: HDF5-based trajectories with padding
-- `SimpleTrajDataset`: Simple trajectory datasets
+- `TrajectoryKDatasetHDF5`: trajectories resampled in time to a fixed length
 - `BaseDataset`: Base dataset class for ManiSkill environments
 
 ## Models
 
 Implemented diffusion models:
-- `DiTTrjCC`: Diffusion Transformer for trajectories
-- `DiffusionUNet`: U-Net based diffusion model
-- `DiffusionUNet1DAtt`: 1D attention U-Net
-- `TransformerDiT`: DiT transformer variant
+- `DiTTrjCC`: Diffusion Transformer for trajectories (history as a prepended token)
+- `DiTTrjCrossAtt`: DiT variant that cross-attends to the history tokens
+- `DiTTrj`: DiT variant that adds the pooled history to the conditioning
 
 ## Contributing
 

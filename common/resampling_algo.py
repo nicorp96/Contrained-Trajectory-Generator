@@ -3,7 +3,17 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Literal, Any
 from scipy.interpolate import CubicSpline, interp1d, PchipInterpolator
 
-Kind = Literal["scalar", "vector", "delta_pose", "accel3", "tcp_pose", "copy"]
+Kind = Literal[
+    "scalar",
+    "vector",
+    "position3",
+    "delta_pose",
+    "accel3",
+    "tcp_pose",
+    "quat4",
+    "angle",
+    "angle_vec",
+]
 
 
 def _interp1(x_src, y_src, x_tgt):
@@ -12,8 +22,8 @@ def _interp1(x_src, y_src, x_tgt):
     x_tgt = np.asarray(x_tgt, dtype=float)
     if np.isnan(y_src).any():
         raise ValueError("NaNs detected in source data for interpolation.")
-    if _HAS_PCHIP and len(x_src) >= 3:
-        f = _Pchip(x_src, y_src, extrapolate=True)
+    if len(x_src) >= 3:
+        f = PchipInterpolator(x_src, y_src, extrapolate=True)
         return f(x_tgt)
     else:
         return np.interp(x_tgt, x_src, y_src)
@@ -220,13 +230,17 @@ class ResamplingBase:
         x = states[:, cols]  # (N,dim)
         kind = spec.kind
 
-        if kind in ("scalar", "vector", "delta_pose", "accel3", "tcp_pose"):
-            # your existing interpolation (linear/cubic/etc) can stay here
+        if kind == "tcp_pose" and x.shape[1] == 7:
+            # [pos3, quat4]: linear position, slerp orientation
+            pos_new = _interp_piecewise_linear(t, x[:, :3], t_grid)
+            quat_new = _interp_quat4(t, x[:, 3:7], t_grid)
+            return np.concatenate([pos_new, quat_new], axis=1)
+
+        if kind in ("scalar", "vector", "position3", "delta_pose", "accel3", "tcp_pose"):
             return self._interp_numeric(spec, t, x, t_grid)
 
         if kind == "angle":
-            # keep your wrap-safe angle interpolation if you already have it
-            return interp_angles(spec, t, x, t_grid)
+            return interp_angles(t, x[:, 0], t_grid, kind=spec.interp)[:, None]
 
         if kind == "quat4":
             if x.shape[1] != 4:
@@ -234,18 +248,6 @@ class ResamplingBase:
                     f"{spec.name}: quat4 kind requires 4 columns, got {x.shape[1]}"
                 )
             return _interp_quat4(t, x, t_grid)
-
-        if kind == "tcp_pose":
-            # assume [pos3, quat4]
-            if x.shape[1] != 7:
-                raise ValueError(
-                    f"{spec.name}: pose7 kind requires 7 columns, got {x.shape[1]}"
-                )
-            pos = x[:, :3]
-            quat = x[:, 3:7]
-            pos_new = _interp_piecewise_linear(t, pos, t_grid)
-            quat_new = _interp_quat4(t, quat, t_grid)
-            return np.concatenate([pos_new, quat_new], axis=1)
 
         if kind == "angle_vec":
             return interp_angle_vec(t, x, t_grid)
@@ -317,15 +319,12 @@ class AbsoluteTimeGrid(ResamplingBase):
         K = self.K
         assert T > 0.0, "non-positive duration"
 
-        if dt is not None and self.K is not None:
-            # keep dt authority; recompute N so end aligns exactly with T
-            K = int(np.floor(T / dt)) + 1
         if dt is None:
-            dt = T / (self.K - 1)
+            dt = T / (K - 1)
         else:
+            # keep dt authority; recompute K so the grid ends at T
             K = int(np.floor(T / dt)) + 1
 
-        self.K = K
         t_new = np.linspace(0, T, K)
         # tq = np.clip(t_new, 0.0, T) if extrapolate_edge else t_new
         D = states.shape[1]
@@ -513,8 +512,8 @@ class ArcLengthGrid(ResamplingBase):
 
         out = {
             "X": stacked,  # concatenated states on the arc-length grid
-            "t_new": stacked,  # kept for backward-compat if your downstream expects it
-            "T": t_grid,  # time samples on the grid
+            "t_new": t_grid,  # time samples on the grid
+            "T": float(t[-1] - t[0]),
             "dt": s_grid,  # normalized arc length
             "L": L,  # total length
             "s_raw": s_raw,
@@ -618,7 +617,7 @@ def build_schema_from_layout(
             kind = kind_map[n]
         else:
             # ---- heuristics (add qpos)
-            if "qpos" in n or "actions" in n:
+            if "qpos" in n:
                 # joint positions in radians -> wrap-aware interpolation
                 kind = "angle_vec"
 
@@ -689,33 +688,3 @@ def prepare_strictly_increasing_x(x, y):
     # also ensure strictly increasing (guard against numeric ties)
     keep = np.r_[True, np.diff(x_u) > 0]
     return x_u[keep], y_u[keep]
-
-
-# Example:
-if __name__ == "__main__":
-    schema = {
-        "position": FieldSpec(kind="position3", cols=(0, 1, 2)),
-        # if you have measured velocities in cols 3:5; put NaNs if missing to auto-compute via chain rule
-        "velocity": FieldSpec(kind="vector", cols=(3, 4, 5), interp="linear"),
-        # accelerations, angles, etc.
-        "accel": FieldSpec(kind="accel3", cols=(6, 7, 8), interp="linear"),
-        "yaw": FieldSpec(kind="angle", cols=(9,), interp="linear"),
-        "throttle": FieldSpec(kind="scalar", cols=(10,), interp="linear"),
-    }
-    state_layout = {
-        "position": 3,
-        "velocity": 3,
-        "accel": 3,
-        "yaw": 1,
-        "throttle": 1,
-    }
-
-    kind_map = {"yaw": "angle"}  # override yaw to be an angle
-
-    schema = build_schema_from_layout(state_layout, kind_map, interp_kind="linear")
-    out = resampler.resample(t, states, schema=schema)
-    T = out["T"]  # (K,)
-    S = out["s"]  # (K,)
-    X_all = out["X"]  # (K, sum(d))
-    pos = out["fields"]["position"]
-    vel = out["fields"]["velocity"]

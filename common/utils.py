@@ -4,6 +4,7 @@ from typing import Dict
 
 AXIS_ID_TO_XYZ = ["x", "y", "z"]
 
+
 def load_config(config_path):
     try:
         with open(config_path, "r") as f:
@@ -13,17 +14,34 @@ def load_config(config_path):
         raise RuntimeError(f"Failed to load config from {config_path}: {e}")
 
 
-def split_state_tensor(
-    state_tensor: torch.Tensor, param_shapes: dict, ignore_keys: list = [""]
-) -> dict:
+def normalized_width(spec: dict) -> int:
+    """Number of channels a state key occupies in normalized space."""
+    width = int(spec["shape"])
+    if spec.get("method_norm") == "sincos":
+        width *= 2
+    return width
+
+
+def split_trajectory(state_tensor: torch.Tensor, param_shapes: dict) -> dict:
+    """
+    Split a normalized [B, T, D] tensor into per-key views.
+    Keeps device and autograd graph (use for losses / guidance).
+    """
     split_dict = {}
     start = 0
-    for name, value in param_shapes.items():
-        if name not in ignore_keys:
-            end = start + value["shape"]
-            split_dict[name] = state_tensor[:, :, start:end]  # .detach().cpu()
-            start = end
+    for name, spec in param_shapes.items():
+        end = start + normalized_width(spec)
+        split_dict[name] = state_tensor[:, :, start:end]
+        start = end
     return split_dict
+
+
+def split_state_tensor(state_tensor: torch.Tensor, param_shapes: dict) -> dict:
+    """Detached CPU variant of split_trajectory (for plotting / logging)."""
+    return {
+        k: v.detach().cpu()
+        for k, v in split_trajectory(state_tensor, param_shapes).items()
+    }
 
 
 def extract_into_shape(
@@ -41,7 +59,6 @@ def extract_into_shape(
     return out.view(b, *([1] * (target.ndim - 1)))
 
 
-
 def dict_to_tensor_concat(
     dict_v: Dict[str, torch.Tensor], dim: int, device: torch.device
 ) -> torch.Tensor:
@@ -50,17 +67,3 @@ def dict_to_tensor_concat(
         dim=dim,
     ).to(device)
     return tensor_concat
-
-
-def split_state_tensor(state_tensor: torch.Tensor, param_shapes: dict) -> dict:
-    split_dict = {}
-    start = 0
-    for name in param_shapes.keys():
-        slc = param_shapes[name]["shape"]
-        method = param_shapes[name]["method_norm"]
-        if method == "sincos":
-            slc = param_shapes[name]["shape"] * 2
-        end = start + slc
-        split_dict[name] = state_tensor[:, :, start:end].detach().cpu()
-        start = end
-    return split_dict

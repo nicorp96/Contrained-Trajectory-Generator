@@ -16,17 +16,27 @@ def modulate(x, shift, scale):
 
 
 class TimeEmbedding(nn.Module):
+    """Diffusion step k -> sinusoidal features -> MLP (as in DiT / DDPM)."""
+
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
+        self.sin_emb = SinusoidalPosEmb(dim)
         self.mlp = nn.Sequential(
-            nn.Linear(1, dim),
+            nn.Linear(dim, dim),
             nn.Mish(),
             nn.Linear(dim, dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
+        return self.mlp(self.sin_emb(x.reshape(-1).float()))
+
+
+def apply_null_cond(cond, null_cond, cond_drop):
+    """Replace the goal by a learned null token where cond_drop is True (CFG)."""
+    if cond_drop is None:
+        return cond
+    return torch.where(cond_drop.view(-1, 1), null_cond.to(cond.dtype).expand_as(cond), cond)
 
 
 class ContinuousCondEmbedder(nn.Module):
@@ -122,6 +132,7 @@ class DiTTrj(nn.Module):
             self.cond_proj = ContinuousCondEmbedder(
                 cond_dim=self.cond_dim, hidden_size=self.d_model
             )
+            self.null_cond = nn.Parameter(torch.zeros(self.cond_dim))
             if self.history:
                 hist_shape = (
                     self.input_dim if self.history_shape is None else self.history_shape
@@ -134,6 +145,9 @@ class DiTTrj(nn.Module):
                     pooling="cls",  # -> to attn
                     return_tokens=False,
                 )
+        else:
+            self.cond_proj = None
+            self.null_cond = None
         self.pos_embd = SinusoidalPosEmb(self.d_model)
         self.pos_embd_cache = None
         self.blocks = nn.ModuleList(
@@ -179,13 +193,18 @@ class DiTTrj(nn.Module):
         cond: (batch_size, cond_dim)
         """
         B, T, _ = x.shape
-        if self.pos_embd_cache is None or self.pos_embd_cache.shape[0] != x.shape[0]:
+        if (
+            self.pos_embd_cache is None
+            or self.pos_embd_cache.shape[0] != T
+            or self.pos_embd_cache.device != x.device
+        ):
             self.pos_embd_cache = self.pos_embd(
                 torch.arange(x.shape[1], device=x.device)
             )
         x = self.trj_proj(x) + self.pos_embd_cache[None,]
-        t = t.expand(B).unsqueeze(1).float()
-        t = self.t_emb(t)
+        t = self.t_emb(t.expand(B))
+        if cond is not None:
+            cond = apply_null_cond(cond, self.null_cond, kwargs.get("cond_drop"))
         if cond is not None and self.history:
             assert (
                 self.cond_proj is not None
@@ -198,12 +217,12 @@ class DiTTrj(nn.Module):
             cond_emb = cond_emb + cond_hist
             # Concatenate conditions
             # cond_emb = torch.concat([cond_emb, cond_hist], dim=-1)
-            t += cond_emb  # , mask)
-        else:
+            t = t + cond_emb
+        elif cond is not None:
             assert (
                 self.cond_proj is not None
             ), "Model is not conditional and cannot accept cond input."
-            t += self.cond_proj(cond)  # , mask)
+            t = t + self.cond_proj(cond)
 
         for block in self.blocks:
             x = block(x, t, mask)
@@ -232,6 +251,7 @@ class DiTTrjCrossAtt(nn.Module):
             self.cond_proj = ContinuousCondEmbedder(
                 cond_dim=self.cond_dim, hidden_size=self.d_model
             )
+            self.null_cond = nn.Parameter(torch.zeros(self.cond_dim))
 
             if self.history:
                 hist_shape = (
@@ -260,6 +280,10 @@ class DiTTrjCrossAtt(nn.Module):
             else:
                 self.history_emb = None
                 self.cross_blocks = None
+        else:
+            self.cond_proj = None
+            self.history_emb = None
+            self.cross_blocks = None
 
         self.pos_embd = SinusoidalPosEmb(self.d_model)
         self.pos_embd_cache = None
@@ -316,15 +340,14 @@ class DiTTrjCrossAtt(nn.Module):
         x = self.trj_proj(x) + self.pos_embd_cache.unsqueeze(0)  # (B, T, d_model)
 
         # timestep embedding
-        t = t.expand(B).unsqueeze(1).float()
-        t = self.t_emb(t)
+        t = self.t_emb(t.expand(B))
 
         memory = None
         mem_key_padding_mask = None
 
         if self.cond_proj is not None:
             assert cond is not None, "Conditional model requires cond."
-
+            cond = apply_null_cond(cond, self.null_cond, kwargs.get("cond_drop"))
             cond_emb = self.cond_proj(cond)
 
             if self.history:
@@ -376,6 +399,7 @@ class DiTTrjCC(nn.Module):
             self.cond_proj = ContinuousCondEmbedder(
                 cond_dim=self.cond_dim, hidden_size=self.d_model
             )
+            self.null_cond = nn.Parameter(torch.zeros(self.cond_dim))
 
             if self.history:
                 hist_shape = (
@@ -389,11 +413,12 @@ class DiTTrjCC(nn.Module):
                     dropout=self.dropout,
                     pooling="attn",  # better than mean
                     return_tokens=False,  # needed for cross-attn
-                    max_hist_len=config.get("history_shape", 124),
+                    max_hist_len=config.get("max_hist_len", 512),
                 )
             else:
                 self.history_emb = None
-                self.cross_blocks = None
+        else:
+            self.cond_proj = None
 
         self.pos_embd = SinusoidalPosEmb(self.d_model)
         self.pos_embd_cache = None
@@ -449,14 +474,12 @@ class DiTTrjCC(nn.Module):
 
         x = self.trj_proj(x) + self.pos_embd_cache.unsqueeze(0)  # (B, T, d_model)
         if t.ndim == 0:
-            # timestep embedding
             t = t.expand(B)
-        t = t.unsqueeze(1).float()
         t = self.t_emb(t)
 
         if self.cond_proj is not None:
             assert cond is not None, "Conditional model requires cond."
-
+            cond = apply_null_cond(cond, self.null_cond, kwargs.get("cond_drop"))
             cond_emb = self.cond_proj(cond)
 
             if self.history:

@@ -122,7 +122,6 @@ class Normalizer(BaseNormalizer):
         self.max.copy_(torch.tensor(dict["max"]))
         self.fitted = True
 
-    @torch.no_grad()
     def forward(self, x, **kwargs):
         if not self.fitted:
             raise RuntimeError("Normalizer not fitted yet.")
@@ -158,7 +157,6 @@ class Normalizer(BaseNormalizer):
             return x
         return None
 
-    @torch.no_grad()
     def unnormalize(self, x):
         if self.method == "standard":
             if self.mean.ndim == 1:
@@ -525,6 +523,15 @@ class DictNormalizer(nn.Module):
     def set_device(self, device):
         for key in self.normalizers.keys():
             self.normalizers[key].set_device(device)
+
+    def load_stats(self, state_dict: dict):
+        """Restore statistics saved with state_dict() (e.g. from a checkpoint)."""
+        for key, norm in self.normalizers.items():
+            prefix = f"normalizers.{key}."
+            for name, value in state_dict.items():
+                if name.startswith(prefix):
+                    setattr(norm, name[len(prefix):], value.clone())
+            norm.fitted = True
 
     def forward(self, x: dict, **kwargs):
         return {
