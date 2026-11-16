@@ -69,3 +69,10 @@ def test_qpos_not_sincos(config):
 )
 def test_normalized_width(spec, width):
     assert normalized_width(spec) == width
+
+
+def test_history_len_matches_dataset(config):
+    """Models that flatten the history (UNetTrjCC) need its length."""
+    if "history_len" not in config["model"]:
+        pytest.skip("model without a fixed history length")
+    assert config["model"]["history_len"] == config["dataset"]["sequence_hist"]
