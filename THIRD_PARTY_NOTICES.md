@@ -1,6 +1,6 @@
 # Third-party code
 
-## models/conditional_unet1d.py
+## ctg/models/conditional_unet1d.py
 
 `ConditionalUnet1D` (1D convolution U-Net with FiLM conditioning) is vendored
 unchanged from ManiSkill, commit `3c0ca14`,

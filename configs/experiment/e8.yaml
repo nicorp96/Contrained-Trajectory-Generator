@@ -1,0 +1,7 @@
+# @package _global_
+# E8 (18/100): the E7b pipeline from images (base, hand, top camera at 256x256), ~5e7 samples.
+defaults:
+  - override /data: peg_image
+  - override /encoder: resnet18_dp
+  - override /training: image
+name: e8

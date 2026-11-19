@@ -1,0 +1,22 @@
+# Franka Panda joint-space constraints (URDF limits). With the defaults below they are
+# only measured (metrics during validation and evaluation); enable them with
+# physics.loss_weight, physics.guidance_eta or physics.project_final.
+defaults:
+  - none
+  - _self_
+
+constraints:
+  _target_: ctg.physics.constraints.JointConstraints
+  dt: 0.05                 # ManiSkill control frequency 20 Hz
+  n_revolute: 7
+  qvel_max: [2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61, 0.5, 0.5]  # fingers: demos reach ~0.44 m/s
+  action_low: -1.0         # pd_joint_delta_pos: normalized actions
+  action_high: 1.0
+  action_delta_scale: 0.1  # rad per unit action
+  weights:
+    kinematic: 1.0
+    joint_limits: 1.0
+    velocity_limits: 1.0
+    acceleration_limits: 0.1
+    action_bounds: 1.0
+    action_consistency: 0.0  # PD tracking lag makes q[t+1] - q[t] = 0.1 a[t] inaccurate

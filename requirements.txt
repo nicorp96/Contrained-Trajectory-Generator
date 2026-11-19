@@ -1,14 +1,17 @@
-accelerate==1.0.1
-diffusers==0.35.2
-einops==0.8.2
-gymnasium==0.29.1  # ManiSkill wrappers need 0.29 attribute forwarding
-h5py==3.15.1
-mani_skill_nightly==2026.1.31.920
-matplotlib==3.10.8
-numpy==2.4.2
-PyYAML==6.0.3
-scipy==1.17.1
-torch==2.5.1+cu124
-torchvision==0.20.1+cu124
-tqdm==4.67.1
-transformers==4.57.1
+# Licenses: all permissive (MIT / BSD / Apache-2.0) and fine for commercial use.
+accelerate==1.0.1          # Apache-2.0
+diffusers==0.35.2          # Apache-2.0
+gymnasium==0.29.1          # MIT; ManiSkill wrappers need 0.29 attribute forwarding
+h5py==3.15.1               # BSD-3
+hydra-core==1.3.2          # MIT (pulls omegaconf, BSD-3)
+imageio==2.38.1            # BSD-2
+mani_skill_nightly==2026.1.31.920  # Apache-2.0
+numpy==2.4.2               # BSD-3
+scipy==1.17.1              # BSD-3
+tensorboard==2.21.0        # Apache-2.0
+torch==2.11.0              # BSD-3 (CUDA 12.8 wheels on the training machine)
+torchvision==0.26.0        # BSD-3
+tqdm==4.67.1               # MIT / MPL-2.0
+# tests
+pytest==9.2.0              # MIT
+pytest-cov==7.1.0          # MIT

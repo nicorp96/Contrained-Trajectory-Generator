@@ -1,0 +1,9 @@
+# Fix 4: peg_image_128 with an added top camera and all cameras at 256x256.
+defaults:
+  - peg_image_128
+  - _self_
+
+dataset:
+  path: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning_top256/trajectory.state_dict+rgb.pd_joint_delta_pos.physx_cpu.h5
+  cameras: [base_camera, hand_camera, top_camera]
+stats: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning_top256/stats.json

@@ -1,0 +1,9 @@
+# @package _global_
+# E4 (8/100): E3 without the previous actions in the history.
+defaults:
+  - override /data: peg_state_norm
+  - override /model: dit
+  - override /diffusion: ddim
+name: e4
+training:
+  mask_padding: true

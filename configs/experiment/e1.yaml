@@ -1,0 +1,19 @@
+# @package _global_
+# E1 (13/100): state with the reference training budget (~1e8 samples).
+defaults:
+  - override /data: peg_state_norm
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+name: e1
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: minmax}
+      qvel: {size: 9, norm: standard}
+    history:
+      actions: {size: 8, norm: standard}
+    plan_len: 64
+    history_len: 8
+training:
+  mask_padding: true

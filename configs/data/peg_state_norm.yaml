@@ -1,0 +1,16 @@
+# peg_state with min-max / standard normalization (the setting of runs state ... E6c).
+defaults:
+  - peg_state
+  - _self_
+
+dataset:
+  plan:
+    actions: {size: 8, norm: standard}
+  goal:
+    box_hole_pose: {size: 7, norm: minmax}
+  history:
+    qpos: {size: 9, norm: minmax}
+    qvel: {size: 9, norm: standard}
+    tcp_pose: {size: 7, norm: minmax}
+    peg_pose: {size: 7, norm: minmax}
+    peg_half_size: {size: 3, norm: minmax}

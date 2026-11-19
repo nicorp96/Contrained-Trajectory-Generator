@@ -1,0 +1,9 @@
+# Image runs: micro-batch 64 x 16 accumulation (= 1024) fits ~16 GB of GPU memory;
+# 501 epochs = ~5e7 samples (~40 h with 3 cameras at 256x256 on an RTX 5090).
+defaults:
+  - default
+  - _self_
+
+epochs: 501
+batch_size: 64
+gradient_accumulation_steps: 16

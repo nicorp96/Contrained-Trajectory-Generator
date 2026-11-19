@@ -1,0 +1,14 @@
+# @package _global_
+# E9 with inpainting: the current joint state is fixed at the first plan step during
+# training and sampling, so every plan starts exactly where the robot is.
+defaults:
+  - override /physics: panda
+name: e9_inpainting
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: none}
+      qvel: {size: 9, norm: none}
+diffusion:
+  inpainting:
+    start_fields: [qpos, qvel]

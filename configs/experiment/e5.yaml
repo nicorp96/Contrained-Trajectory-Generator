@@ -1,0 +1,8 @@
+# @package _global_
+# E5 (32/100): E4 with Diffusion Policy's U-Net instead of the DiT.
+defaults:
+  - override /data: peg_state_norm
+  - override /diffusion: ddim
+name: e5
+training:
+  mask_padding: true

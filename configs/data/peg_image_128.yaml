@@ -1,0 +1,20 @@
+# First image setting (Fix 2 / Fix 3): base and hand camera at 128x128, normalized fields,
+# plans of joint positions, velocities and actions, previous actions in the history.
+defaults:
+  - peg_state_norm
+  - _self_
+
+dataset:
+  plan:
+    qpos: {size: 9, norm: minmax}
+    qvel: {size: 9, norm: standard}
+  history:
+    actions: {size: 8, norm: standard}
+    tcp_pose: null
+    peg_pose: null
+    peg_half_size: null
+  cameras: [base_camera, hand_camera]
+  plan_len: 64
+  history_len: 8
+stats: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning/stats.json
+samples_per_episode: 1

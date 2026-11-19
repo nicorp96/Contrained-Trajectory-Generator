@@ -1,0 +1,23 @@
+# ~1e8 training samples: 1001 epochs x 797 episodes x 128 windows, batch 1024
+epochs: 1001
+batch_size: 1024
+gradient_accumulation_steps: 1   # effective batch = batch_size x accumulation (GroupNorm: equivalent)
+learning_rate: 1.0e-4
+encoder_learning_rate: 1.0e-4
+weight_decay: 0.01
+lr_schedule: cosine
+warmup_steps: 5000               # optimizer steps
+mixed_precision: bf16
+seed: 0
+num_workers: 16
+mask_padding: false              # true: padded steps after the episode end do not enter the loss
+val_every: 50                    # epochs
+save_every: 50
+progress_interval: 1.0           # seconds between progress-bar updates
+resume: null                     # checkpoint path to continue from
+ema:
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_decay: 0.0
+  max_decay: 0.9999

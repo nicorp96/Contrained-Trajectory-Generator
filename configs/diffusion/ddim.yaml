@@ -1,0 +1,13 @@
+# DDIM with 1000 training and 25 sampling steps and classifier-free guidance on the goal
+# (the setting of the first runs).
+defaults:
+  - ddpm
+  - _self_
+
+scheduler:
+  sampler: ddim
+  num_train_timesteps: 1000
+  set_alpha_to_one: true
+num_inference_steps: 25
+guidance_scale: 1.5
+goal_drop_prob: 0.1

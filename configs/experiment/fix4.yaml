@@ -1,0 +1,13 @@
+# @package _global_
+# Fix 4 (6/100): Fix 3 with a top camera and all cameras at 256x256 (batch 32 x 2).
+defaults:
+  - override /data: peg_image_256
+  - override /encoder: resnet18_dp
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+  - override /training: legacy
+name: fix4
+training:
+  batch_size: 32
+  gradient_accumulation_steps: 2

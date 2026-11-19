@@ -1,0 +1,27 @@
+# Training entry point:  python scripts/train.py [experiment=<name>] [group=option] [key=value]
+# Default: the state-based pipeline that reproduces ManiSkill's Diffusion Policy (E7b).
+defaults:
+  - data: peg_state
+  - encoder: none
+  - model: unet
+  - diffusion: ddpm
+  - physics: none
+  - training: default
+  - _self_
+  - experiment: null  # configs/experiment/<name>.yaml, applied last
+
+name: e7b  # run name (folder below paths.logs/runs)
+
+paths:
+  data: ${oc.env:CTG_DATA_DIR,/mnt/data_nrp/dataset}
+  logs: ${oc.env:CTG_LOGS_DIR,/mnt/data_nrp/constrained_trajectory_generator/logging}
+
+evaluation:
+  action_horizon: 8  # actions executed per plan before replanning
+
+hydra:
+  run:
+    dir: ${paths.logs}/runs/${name}/${now:%Y%m%d-%H%M%S}
+  sweep:
+    dir: ${paths.logs}/sweeps/${name}/${now:%Y%m%d-%H%M%S}
+    subdir: ${hydra.job.num}
