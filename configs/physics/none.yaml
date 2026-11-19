@@ -1,6 +1,7 @@
 # No physical constraints (no constraint metrics, loss or guidance).
 constraints: null
 loss_weight: 0.0          # physics loss on the denoised estimate (needs constraints)
+loss_start: 0.2           # physics loss only for low-noise steps k <= loss_start * num_train_timesteps
 guidance_eta: 0.0         # physics guidance step during sampling (0 = off)
 guidance_grad_clip: 1.0   # max L2 norm of the constraint gradient per sample
 guidance_start: 1.0       # guide only steps k <= guidance_start * num_train_timesteps

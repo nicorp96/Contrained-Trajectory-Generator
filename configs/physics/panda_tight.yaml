@@ -1,0 +1,13 @@
+# Panda constraints with the joint velocity limits at 20 % of the URDF values (0.44-0.52 rad/s),
+# e.g. for slow motion near people. 6-8 % of the demonstration steps exceed them, so the
+# physics methods have to correct the learned behaviour. Fingers keep their limit.
+defaults:
+  - panda
+  - _self_
+
+constraints:
+  qvel_max: [0.435, 0.435, 0.435, 0.435, 0.522, 0.522, 0.522, 0.5, 0.5]
+  weights:
+    # the excess over the tight limits is small (demonstrations: energy 7e-4); x10 gives it
+    # the weight of the acceleration term, so the physics loss acts on it
+    velocity_limits: 10.0

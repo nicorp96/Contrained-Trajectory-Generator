@@ -1,0 +1,13 @@
+# @package _global_
+# E9 with the physics loss: constraint energy of the denoised plan (Panda limits and the
+# identified controller response) added to the diffusion loss during training.
+defaults:
+  - override /physics: panda
+name: e9_phys
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: none}
+      qvel: {size: 9, norm: none}
+physics:
+  loss_weight: 0.1

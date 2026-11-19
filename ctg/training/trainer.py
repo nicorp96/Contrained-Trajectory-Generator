@@ -7,8 +7,10 @@ encoders (cfg.encoder), denoiser (cfg.model), noise scheduler and sampling
 Widths of plan, goal and history are derived from the data layout and the encoders.
 
 Loss: MSE between prediction and target over real (not padded) and not inpainted
-plan entries, plus optionally physics_weight * constraint energy of the denoised
-estimate, weighted by alpha_bar(t) so nearly pure-noise samples barely contribute.
+plan entries, plus optionally physics.loss_weight * constraint energy of the denoised
+estimate. The energy only counts for low-noise samples (k <= physics.loss_start * T),
+weighted by alpha_bar(k): at high noise the estimate is necessarily poor, and limits on
+velocities and accelerations magnify its errors by 1/dt and 1/dt^2.
 """
 
 import copy
@@ -94,6 +96,7 @@ class Trainer:
         self.encoders, self.model = parts["encoders"].to(self.device), parts["model"].to(self.device)
         self.noise_scheduler, self.constraints, self.sampler = parts["noise_scheduler"], parts["constraints"], parts["sampler"]
         self.physics_weight = float(cfg.physics.loss_weight) if self.constraints is not None else 0.0
+        self.physics_max_step = cfg.physics.loss_start * self.noise_scheduler.config.num_train_timesteps
         self.start_dims = channel_indices(dataset.plan_layout, cfg.diffusion.inpainting.start_fields)
         self.goal_dims = channel_indices(dataset.plan_layout, cfg.diffusion.inpainting.goal_fields)
 
@@ -172,10 +175,10 @@ class Trainer:
             if known is not None:
                 x0_hat = torch.where(known, x0, x0_hat)
             terms = self.constraints.energy(self.codec.decode(x0_hat), b["mask"], b["time"])  # padding never penalised
-            w = self.noise_scheduler.alphas_cumprod.to(self.device)[k].float()
-            physics = (w * terms["total"]).sum() / w.sum().clamp_min(1e-8)
-            out.update({"loss": loss + self.physics_weight * physics, "physics": physics.detach()},
-                       **{f"physics_{n}": v.mean().detach() for n, v in terms.items() if n != "total"})
+            w = self.noise_scheduler.alphas_cumprod.to(self.device)[k].float() * (k <= self.physics_max_step).float()
+            weighted = {n: (w * v).sum() / w.sum().clamp_min(1e-8) for n, v in terms.items()}
+            out.update({"loss": loss + self.physics_weight * weighted["total"], "physics": weighted["total"].detach()},
+                       **{f"physics_{n}": v.detach() for n, v in weighted.items() if n != "total"})
         return out
 
     def train(self):

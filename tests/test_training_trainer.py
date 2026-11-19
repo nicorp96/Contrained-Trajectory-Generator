@@ -81,3 +81,23 @@ def test_image_pipeline_with_trainable_encoder(demo_h5, demo_stats, tmp_path):
     assert trainer.ema_encoders is not None and len(trainer.optimizer.param_groups) == 2
     ckpt = torch.load(tmp_path / "checkpoints" / "epoch_00000.pt", map_location="cpu", weights_only=False)
     assert ckpt["ema_encoders"] is not None
+
+
+def test_physics_loss_only_on_low_noise_steps(demo_h5, demo_stats, tmp_path, monkeypatch):
+    import ctg.training.trainer as trainer_module
+
+    trainer = train_tiny(demo_h5, demo_stats, tmp_path, "experiment=e9_phys", "training.epochs=1")
+    batch = next(iter(trainer.train_loader))
+    real_randint = torch.randint
+
+    def fixed_steps(step):
+        monkeypatch.setattr(trainer_module.torch, "randint",
+                            lambda low, high, size, **kw: torch.full(size, step, device=kw.get("device")))
+        out = trainer.train_step(batch)
+        monkeypatch.setattr(trainer_module.torch, "randint", real_randint)
+        return out
+
+    assert trainer.physics_max_step == 20  # 0.2 x 100 training steps
+    high, low = fixed_steps(90), fixed_steps(5)
+    assert high["physics"] == 0 and torch.isclose(high["loss"], high["diffusion"])
+    assert low["physics"] > 0 and low["loss"] > low["diffusion"]
