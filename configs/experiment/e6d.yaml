@@ -1,0 +1,7 @@
+# @package _global_
+# E6d (52/100): E5 without normalization.
+defaults:
+  - override /diffusion: ddim
+name: e6d
+training:
+  mask_padding: true

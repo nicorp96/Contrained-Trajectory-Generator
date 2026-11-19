@@ -1,0 +1,8 @@
+# @package _global_
+# E7a (52/100): E5 without normalization and with DDPM (100 / 100 steps).
+name: e7a
+diffusion:
+  guidance_scale: 1.5
+  goal_drop_prob: 0.1
+training:
+  mask_padding: true

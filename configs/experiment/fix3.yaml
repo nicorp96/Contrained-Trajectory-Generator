@@ -1,0 +1,10 @@
+# @package _global_
+# Fix 3 (2/100): trainable ResNet18 (GroupNorm, spatial softmax), DiT, 64-step plans, 8 executed.
+defaults:
+  - override /data: peg_image_128
+  - override /encoder: resnet18_dp
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+  - override /training: legacy
+name: fix3

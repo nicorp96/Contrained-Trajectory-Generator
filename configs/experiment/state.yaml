@@ -1,0 +1,19 @@
+# @package _global_
+# State diagnostic (0/100): the Fix 3 pipeline with object state instead of cameras.
+defaults:
+  - override /data: peg_state_norm
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+  - override /training: legacy
+name: state
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: minmax}
+      qvel: {size: 9, norm: standard}
+    history:
+      actions: {size: 8, norm: standard}
+    plan_len: 64
+    history_len: 8
+  samples_per_episode: 1

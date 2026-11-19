@@ -1,0 +1,13 @@
+# @package _global_
+# E3 (9/100): E2 planning only the actions.
+defaults:
+  - override /data: peg_state_norm
+  - override /model: dit
+  - override /diffusion: ddim
+name: e3
+data:
+  dataset:
+    history:
+      actions: {size: 8, norm: standard}
+training:
+  mask_padding: true

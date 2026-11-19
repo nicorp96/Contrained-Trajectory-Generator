@@ -1,0 +1,13 @@
+# @package _global_
+# E9 trained with the physics loss against the tightened velocity limits (20 %).
+# Evaluate E9 itself with --physics panda_tight for the comparison without the loss.
+defaults:
+  - override /physics: panda_tight
+name: e9_tight_phys
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: none}
+      qvel: {size: 9, norm: none}
+physics:
+  loss_weight: 0.1

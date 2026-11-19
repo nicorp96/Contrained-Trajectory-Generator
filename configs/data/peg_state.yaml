@@ -1,0 +1,23 @@
+# PegInsertionSide-v1 with object state instead of images (diagnostic setting):
+# the policy sees joints, gripper pose and peg pose/size; the goal is the box hole pose.
+dataset:
+  _target_: ctg.data.maniskill.DemoDataset
+  path: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning/trajectory.state_dict+rgb.pd_joint_delta_pos.physx_cpu.h5
+  plan:              # what the denoiser generates
+    actions: {size: 8, norm: none}       # pd_joint_delta_pos: 7 joint deltas + gripper, in [-1, 1]
+  goal:
+    box_hole_pose: {size: 7, norm: none}
+  history:           # observation history (last history_len steps)
+    qpos: {size: 9, norm: none}
+    qvel: {size: 9, norm: none}
+    tcp_pose: {size: 7, norm: none}
+    peg_pose: {size: 7, norm: none}
+    peg_half_size: {size: 3, norm: none}
+  cameras: []
+  plan_len: 16       # 0.8 s at 20 Hz
+  history_len: 2
+  control_dt: 0.05
+stats: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning/stats_state.json
+val_ratio: 0.2       # episode-level split, identical for training, stats and evaluation
+split_seed: 0
+samples_per_episode: 128  # random windows per training episode and epoch

@@ -1,0 +1,9 @@
+# Frozen ImageNet ResNet18 with BatchNorm and average pooling (512 features), torchvision
+# preprocessing (resize 256 / center crop 224). The setting of the first image runs.
+_target_: ctg.models.encoders.ResNet18Encoder
+_partial_: true
+pretrained: true
+norm: batch
+pool: avg
+center_crop: true
+trainable: false

@@ -1,0 +1,7 @@
+# Diffusion Policy's 1D-convolution U-Net (FiLM conditioning on flattened history + goal).
+# plan_dim, goal_dim, history_dim and history_len are filled in from the data layout.
+_target_: ctg.models.unet.UNetDenoiser
+down_dims: [64, 128, 256]
+step_embed_dim: 64
+kernel_size: 5
+n_groups: 8

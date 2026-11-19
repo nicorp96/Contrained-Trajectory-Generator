@@ -1,0 +1,12 @@
+# Training budget of the first runs (Fix 2 ... state, ~4e6 samples): 5501 epochs, batch 64,
+# one window per episode and epoch, padded steps excluded from the loss.
+defaults:
+  - default
+  - _self_
+
+epochs: 5501
+batch_size: 64
+num_workers: 8
+mask_padding: true
+val_every: 100
+save_every: 100

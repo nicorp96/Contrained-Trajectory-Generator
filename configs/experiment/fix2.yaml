@@ -1,0 +1,16 @@
+# @package _global_
+# Fix 2 (0/100): frozen ResNet18, DiT, 430-step plans executed one action at a time.
+# Not exactly reproducible: the original also had the unfreeze / BatchNorm bugs fixed in Fix 3.
+defaults:
+  - override /data: peg_image_128
+  - override /encoder: resnet18_frozen
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+  - override /training: legacy
+name: fix2
+data:
+  dataset:
+    plan_len: 430
+evaluation:
+  action_horizon: 1

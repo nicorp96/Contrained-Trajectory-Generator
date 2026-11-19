@@ -1,0 +1,17 @@
+# @package _global_
+# E2 (15/100): E1 with 16-step plans and 2 history steps.
+defaults:
+  - override /data: peg_state_norm
+  - override /model: dit
+  - override /diffusion: ddim
+  - override /physics: panda
+name: e2
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: minmax}
+      qvel: {size: 9, norm: standard}
+    history:
+      actions: {size: 8, norm: standard}
+training:
+  mask_padding: true

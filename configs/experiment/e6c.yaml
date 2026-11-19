@@ -1,0 +1,6 @@
+# @package _global_
+# E6c (39/100): E5 with the loss also on padded steps after the episode end.
+defaults:
+  - override /data: peg_state_norm
+  - override /diffusion: ddim
+name: e6c

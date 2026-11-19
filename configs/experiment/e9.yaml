@@ -1,0 +1,11 @@
+# @package _global_
+# E9: base for the physics experiments. E7b planning joint positions and velocities as
+# well as actions, so the Panda constraints can be measured and enforced on the plan.
+defaults:
+  - override /physics: panda
+name: e9
+data:
+  dataset:
+    plan:
+      qpos: {size: 9, norm: none}
+      qvel: {size: 9, norm: none}

@@ -1,0 +1,17 @@
+# @package _global_
+# E9 with resampled plans: the rest of the episode compressed into 16 points uniform in
+# time. The plan time stamps enter the constraints, so velocities stay consistent.
+# Training and validation only: resampled actions cannot be executed step by step.
+defaults:
+  - override /physics: panda
+name: e9_resampled_time
+data:
+  dataset:
+    _target_: ctg.data.maniskill.ResampledDemoDataset
+    resampler:
+      _target_: ctg.data.resampling.TimeResampler
+      num_points: ${data.dataset.plan_len}
+      method: linear
+    plan:
+      qpos: {size: 9, norm: none}
+      qvel: {size: 9, norm: none}

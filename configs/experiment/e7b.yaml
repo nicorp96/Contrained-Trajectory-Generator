@@ -1,0 +1,5 @@
+# @package _global_
+# E7b (59/100): the reference pipeline (= train.yaml defaults): U-Net, no normalization,
+# DDPM 100 / 100, no classifier-free guidance, loss on padded steps. ManiSkill's own
+# Diffusion Policy reaches 61-74 % on the same data.
+name: e7b

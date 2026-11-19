@@ -1,0 +1,17 @@
+# DDPM with 100 training and 100 sampling steps, as ManiSkill's Diffusion Policy.
+scheduler:
+  _target_: ctg.diffusion.scheduler.build_noise_scheduler
+  sampler: ddpm
+  num_train_timesteps: 100
+  beta_schedule: squaredcos_cap_v2   # beta_start / beta_end are ignored by this schedule
+  beta_start: 1.0e-5
+  beta_end: 0.0085
+  prediction_type: epsilon
+  clip_sample: false
+  timestep_spacing: leading
+num_inference_steps: 100
+guidance_scale: 1.0     # classifier-free guidance on the goal (1.0 = off)
+goal_drop_prob: 0.0     # share of training samples with the goal replaced by the null token
+inpainting:             # plan fields fixed during training and sampling
+  start_fields: []      # e.g. [qpos, qvel]: the current state at the first plan step
+  goal_fields: []       # fields fixed at the last plan step (training only knows them)

@@ -1,0 +1,10 @@
+# Diffusion-Policy-style image encoder, one per camera: ResNet18 (ImageNet init) with
+# GroupNorm and 32 spatial-softmax keypoints (64 features), trained end to end.
+_target_: ctg.models.encoders.ResNet18Encoder
+_partial_: true
+pretrained: true
+norm: group
+pool: spatial_softmax
+num_keypoints: 32
+center_crop: false
+trainable: true

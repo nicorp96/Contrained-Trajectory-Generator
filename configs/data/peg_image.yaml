@@ -1,0 +1,15 @@
+# PegInsertionSide-v1 from images: base, hand and top camera at 256x256 plus the robot's
+# own joint state; the peg pose is never observed. The goal is the box hole pose.
+# Dataset: re-rendered with scripts/replay_cameras.py (--resolution 256 --cameras top).
+defaults:
+  - peg_state
+  - _self_
+
+dataset:
+  path: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning_top256/trajectory.state_dict+rgb.pd_joint_delta_pos.physx_cpu.h5
+  history:
+    tcp_pose: null
+    peg_pose: null
+    peg_half_size: null
+  cameras: [base_camera, hand_camera, top_camera]
+stats: ${paths.data}/mani_skill_data/demos/PegInsertionSide-v1/motionplanning_top256/stats.json
