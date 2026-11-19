@@ -13,10 +13,14 @@ constraints:
   action_low: -1.0         # pd_joint_delta_pos: normalized actions
   action_high: 1.0
   action_delta_scale: 0.1  # rad per unit action
+  # identified PD response per revolute joint: dq[t] = alpha dq[t-1] + beta 0.1 a[t]
+  # (scripts/identify_controller.py on the PegInsertion training episodes, validation R^2 0.965-0.994)
+  controller_alpha: [0.9334, 0.3505, 0.9338, 0.648, 0.8429, 0.6639, 0.8379]
+  controller_beta: [0.022, 0.2513, 0.0224, 0.1355, 0.063, 0.1345, 0.0611]
   weights:
     kinematic: 1.0
     joint_limits: 1.0
     velocity_limits: 1.0
     acceleration_limits: 0.1
     action_bounds: 1.0
-    action_consistency: 0.0  # PD tracking lag makes q[t+1] - q[t] = 0.1 a[t] inaccurate
+    action_consistency: 1.0  # couples the planned actions to the planned joint motion

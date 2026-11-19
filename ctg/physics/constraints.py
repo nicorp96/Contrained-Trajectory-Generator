@@ -10,10 +10,15 @@ sampling, metrics and the final projection.
   velocity_limits     |qd| above qvel_max (qd from qvel, else differences of q)
   acceleration_limits |qdd| above qacc_max (differences of qd)
   action_bounds       action outside [action_low, action_high]                (needs actions)
-  action_consistency  q[t+1] - q[t] - action_delta_scale * a[t]              (pd_joint_delta_pos)
+  action_consistency  joint change vs. commanded change u = action_delta_scale * a   (pd_joint_delta_pos)
+                      without a controller model: dq[t] - u[t]
+                      with the identified first-order lag (ctg.physics.identification):
+                      dq[t] - alpha * dq[t-1] - beta * u[t],   dq[t] = q[t+1] - q[t]
 
 Terms whose fields are missing from the plan are skipped. The time step is `dt`,
 or per sample from the plan time stamps (`time` [B, T]) for non-uniform plans.
+The controller model is discrete at the control rate, so action_consistency is
+skipped for plans whose time stamps are not spaced by dt (resampled plans).
 """
 
 import math
@@ -70,6 +75,8 @@ class JointConstraints:
         action_low: float = -1.0,
         action_high: float = 1.0,
         action_delta_scale: float = 0.1,
+        controller_alpha: Optional[Sequence[float]] = None,
+        controller_beta: Optional[Sequence[float]] = None,
         weights: Optional[Mapping[str, float]] = None,
         tolerances: Optional[Mapping[str, float]] = None,
         wrap_angles: bool = False,
@@ -85,6 +92,15 @@ class JointConstraints:
         self.qacc_max = torch.tensor([float(v) for v in qacc_max], dtype=torch.float32)
         self.action_low, self.action_high = float(action_low), float(action_high)
         self.action_delta_scale = float(action_delta_scale)
+        if (controller_alpha is None) != (controller_beta is None):
+            raise ValueError("controller_alpha and controller_beta must be given together")
+        self.controller = None
+        if controller_alpha is not None:
+            alpha, beta = (torch.tensor([float(v) for v in c], dtype=torch.float32)
+                           for c in (controller_alpha, controller_beta))
+            if alpha.shape != beta.shape:
+                raise ValueError("controller_alpha and controller_beta need one value per joint")
+            self.controller = (alpha, beta)
         self.weights = {**DEFAULT_WEIGHTS, **(weights or {})}
         self.tolerances = {**DEFAULT_TOLERANCES, **(tolerances or {})}
         self.wrap = bool(wrap_angles)
@@ -106,6 +122,20 @@ class JointConstraints:
         if time is None:
             return self.dt
         return (time[:, 1:] - time[:, :-1]).to(ref.dtype).clamp_min(1e-6).unsqueeze(-1)
+
+    def _uniform(self, time: Optional[torch.Tensor]) -> bool:
+        return time is None or bool(torch.all((time[:, 1:] - time[:, :-1] - self.dt).abs() < 1e-5))
+
+    def _action_consistency(self, q, a, mask):
+        """Residual of the joint change against the commanded change u = action_delta_scale * a."""
+        dq, u = self._dq(q), self.action_delta_scale * a
+        if self.controller is None:
+            n = min(self.n_revolute, a.shape[-1])
+            return (dq[..., :n] - u[:, :-1, :n]).abs(), pair_mask(mask, 1)
+        alpha, beta = (self._to(q, c) for c in self.controller)
+        n = alpha.shape[0]
+        pred = alpha * dq[:, :-1, :n] + beta * u[:, 1:-1, :n]
+        return (dq[:, 1:, :n] - pred).abs(), pair_mask(mask, 2)
 
     def _joint_excess(self, q: torch.Tensor) -> torch.Tensor:
         lower, upper = self._to(q, self.q_lower), self._to(q, self.q_upper)
@@ -142,10 +172,8 @@ class JointConstraints:
             out["kinematic"] = ((self._dq(q) - 0.5 * dt * (qd[:, 1:] + qd[:, :-1])).abs(), pair_mask(mask, 1))
         if a is not None:
             out["action_bounds"] = (F.relu(a - self.action_high) + F.relu(self.action_low - a), mask)
-            if q is not None:
-                n = min(self.n_revolute, a.shape[-1])
-                out["action_consistency"] = ((self._dq(q)[..., :n] - self.action_delta_scale * a[:, :-1, :n]).abs(),
-                                             pair_mask(mask, 1))
+            if q is not None and q.shape[1] > 2 and self._uniform(time):
+                out["action_consistency"] = self._action_consistency(q, a, mask)
         return out
 
     def energy(self, x, mask=None, time=None) -> Dict[str, torch.Tensor]:
