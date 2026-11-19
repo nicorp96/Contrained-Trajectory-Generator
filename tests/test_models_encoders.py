@@ -1,55 +1,43 @@
-"""Image encoders: trainability, normalization layers, pooling and train/eval modes."""
+"""ctg/models/encoders.py: trainability, normalization layers, pooling and train/eval modes."""
 
 import pytest
 import torch
 import torch.nn as nn
 
-from models.utils.encoders_robot import (
-    ResNet18Encoder,
-    SpatialSoftmax,
-    replace_batchnorm_with_groupnorm,
-)
-from trainer.trainer_diffusion_traj import build_image_encoders
+from functools import partial
+
+from ctg.models.encoders import CameraEncoders, ResNet18Encoder, SpatialSoftmax, replace_batchnorm_with_groupnorm
 
 
 def n_trainable(module):
     return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
 
-def config(**camera):
-    camera = {"type": "resnet18", "pretrained": False, **camera}
-    return {"model": {"image_encoders": {"base_camera": camera}}}
-
-
-def encoder(cfg, **kw):
-    return build_image_encoders(cfg, **kw).encoders["base_camera"]
+def encoder(**kw):
+    return ResNet18Encoder(pretrained=False, **kw)
 
 
 # ---------------------------------------------------------------- trainability
 def test_train_last_n_unfreezes_only_last_stage():
-    enc = encoder(config(trainable=True, train_last_n=1))
-    trainable = {n.split(".")[1] for n, p in enc.named_parameters() if p.requires_grad}
+    enc = encoder(trainable=True, train_last_n=1)
+    trainable = {n.split(".")[0] for n, p in enc.backbone.named_parameters() if p.requires_grad}
     assert trainable == {"layer4"}
 
 
 def test_train_last_n_includes_spatial_softmax_head():
-    enc = encoder(config(trainable=True, train_last_n=1, pool="spatial_softmax"))
+    enc = encoder(trainable=True, train_last_n=1, pool="spatial_softmax")
     assert all(p.requires_grad for p in enc.pool.parameters())
     assert not any(p.requires_grad for p in enc.backbone.layer3.parameters())
 
 
 def test_trainable_without_train_last_n_trains_everything():
-    enc = encoder(config(trainable=True))
+    enc = encoder(trainable=True)
     assert n_trainable(enc) == sum(p.numel() for p in enc.parameters())
 
 
-@pytest.mark.parametrize("cfg", [config(), config(trainable=False)])
-def test_frozen_encoder_has_no_trainable_parameters(cfg):
-    assert n_trainable(encoder(cfg)) == 0
-
-
-def test_inference_build_is_frozen():
-    assert n_trainable(encoder(config(trainable=True), for_inference=True)) == 0
+def test_frozen_encoder_has_no_trainable_parameters():
+    enc = encoder(trainable=False)
+    assert n_trainable(enc) == 0 and not enc.is_trainable
 
 
 # ---------------------------------------------------------------- normalization
@@ -72,8 +60,8 @@ def test_invalid_options_raise(kw):
 
 
 # ---------------------------------------------------------------- outputs
-def test_default_encoder_keeps_original_behaviour():
-    enc = ResNet18Encoder(pretrained=False).eval()
+def test_average_pooling_encoder_output():
+    enc = ResNet18Encoder(pretrained=False, pool="avg").eval()
     assert enc.output_dim == 512
     assert enc(torch.rand(2, 3, 128, 128)).shape == (2, 512)
 
@@ -87,7 +75,7 @@ def test_spatial_softmax_encoder_output():
 
 
 def test_no_center_crop_sees_the_image_border():
-    enc = ResNet18Encoder(pretrained=False, center_crop=False).eval()
+    enc = ResNet18Encoder(pretrained=False, pool="avg", center_crop=False).eval()
     img = torch.zeros(1, 3, 128, 128)
     border = img.clone()
     border[..., :4] = 1.0  # change only the left border columns
@@ -95,7 +83,7 @@ def test_no_center_crop_sees_the_image_border():
 
 
 def test_center_crop_ignores_the_image_border():
-    enc = ResNet18Encoder(pretrained=False, center_crop=True).eval()
+    enc = ResNet18Encoder(pretrained=False, pool="avg", center_crop=True).eval()
     img = torch.zeros(1, 3, 128, 128)
     border = img.clone()
     border[..., :4] = 1.0
@@ -114,11 +102,10 @@ def test_spatial_softmax_finds_the_peak():
 
 # ---------------------------------------------------------------- train/eval modes
 def test_frozen_encoder_stays_in_eval_mode_during_training():
-    cfg = {"model": {"image_encoders": {
-        "base_camera": {"type": "resnet18", "pretrained": False, "trainable": False},
-        "hand_camera": {"type": "resnet18", "pretrained": False, "trainable": True},
-    }}}
-    encoders = build_image_encoders(cfg).train()
+    trainable = iter([False, True])
+    encoders = CameraEncoders(["base_camera", "hand_camera"],
+                              lambda: ResNet18Encoder(pretrained=False, trainable=next(trainable))).train()
+    assert encoders.is_trainable
     assert encoders.training
     assert not encoders.encoders["base_camera"].training
     assert encoders.encoders["hand_camera"].training
@@ -127,8 +114,22 @@ def test_frozen_encoder_stays_in_eval_mode_during_training():
 
 
 def test_frozen_batchnorm_statistics_do_not_change_in_training():
-    encoders = build_image_encoders(config(trainable=False)).train()
+    encoders = CameraEncoders(["base_camera"], partial(encoder, norm="batch", trainable=False)).train()
     bn = encoders.encoders["base_camera"].backbone.bn1
     before = bn.running_mean.clone()
     encoders({"base_camera": torch.rand(2, 1, 3, 64, 64)})
     assert torch.equal(bn.running_mean, before)
+
+
+def test_camera_encoders_encode_only_cameras():
+    encoders = CameraEncoders(["base_camera"], partial(encoder, num_keypoints=4)).eval()
+    assert encoders.feature_dims == {"base_camera": 8}
+    out = encoders({"base_camera": torch.rand(2, 3, 3, 32, 32), "qpos": torch.ones(2, 3, 9)})
+    assert out["base_camera"].shape == (2, 3, 8) and torch.equal(out["qpos"], torch.ones(2, 3, 9))
+
+
+def test_camera_encoders_without_cameras():
+    encoders = CameraEncoders()
+    assert encoders.feature_dims == {} and not encoders.is_trainable
+    with pytest.raises(ValueError, match="no encoder"):
+        CameraEncoders(["base_camera"])

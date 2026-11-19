@@ -1,13 +1,12 @@
-"""environment/replay_cameras.py: camera setup in the dataset json and a real one-episode replay."""
+"""ctg/envs/rerender.py: camera setup in the dataset json and a real one-episode replay."""
 
 import json
 import os
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from environment.replay_cameras import ENV_ID, EXTRA_CAMERAS, camera_env_info, output_path, prepare
+from ctg.envs.rerender import ENV_ID, EXTRA_CAMERAS, camera_env_info, output_path, prepare
 
 ENV_INFO = {
     "env_id": "PegInsertionSide-v1",
@@ -49,17 +48,15 @@ def test_prepare_links_states_and_writes_json(tmp_path):
     assert json.loads((out / "trajectory.json").read_text())["env_info"]["env_kwargs"]["extra_cameras"] == []
 
 
-def test_replay_one_episode_keeps_actions(tmp_path):
+def test_replay_one_episode_keeps_actions(tmp_path, demos_dir):
     pytest.importorskip("mani_skill")
     h5py = pytest.importorskip("h5py")
-    from environment.replay_cameras import main
-    from global_parameters import ConfigGlobalP
+    from ctg.envs.rerender import rerender
 
-    src = os.path.join(ConfigGlobalP().DATA_DIR, "mani_skill_data/demos/PegInsertionSide-v1/motionplanning/"
-                       "trajectory.state_dict+rgb.pd_joint_delta_pos.physx_cpu.h5")
+    src = str(demos_dir / "trajectory.state_dict+rgb.pd_joint_delta_pos.physx_cpu.h5")
     if not os.path.exists(src):
         pytest.skip("converted demonstrations not available")
-    out = main(SimpleNamespace(src=src, out_dir=str(tmp_path), resolution=64, cameras=["top"], num_procs=1, count=1))
+    out = rerender(src, str(tmp_path), resolution=64, cameras=["top"], num_procs=1, count=1)
 
     meta = json.loads((tmp_path / "trajectory.json").read_text())
     ep = meta["episodes"][0]["episode_id"]

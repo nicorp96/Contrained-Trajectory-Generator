@@ -1,10 +1,10 @@
-"""Tests for the env and video helpers of run_evaluation.py."""
+"""ctg/envs/evaluation.py: env, video and end-state helpers."""
 
 import pytest
 
 pytest.importorskip("mani_skill")
 
-from run_evaluation import camera_kwargs, insertion_state, make_env, rename_videos  # noqa: E402
+from ctg.envs.evaluation import camera_kwargs, dataset_env_info, insertion_state, make_env, rename_videos  # noqa: E402
 
 ENV_ID = "PegInsertionSide-v1"
 CONTROL_MODE = "pd_joint_delta_pos"
@@ -120,3 +120,27 @@ def _wrapper_names(env):
         names.append(type(env).__name__)
         env = getattr(env, "env", None)
     return names
+
+
+def test_dataset_env_info(tmp_path):
+    (tmp_path / "demo.json").write_text('{"env_info": {"env_id": "X-v1", "env_kwargs": {"control_mode": "c"}}}')
+    assert dataset_env_info(str(tmp_path / "demo.h5")) == {"env_id": "X-v1", "control_mode": "c"}
+    assert dataset_env_info(str(tmp_path / "missing.h5")) == {}
+
+
+def test_evaluate_runs_closed_loop_with_constraint_metrics(e9_checkpoint):
+    from ctg.envs.evaluation import evaluate
+    from ctg.policy.diffusion_policy import DiffusionPolicy
+
+    policy = DiffusionPolicy.from_checkpoint(e9_checkpoint, overrides=["diffusion.num_inference_steps=2"],
+                                             action_horizon=4)
+    env = make_env(ENV_ID, CONTROL_MODE, max_steps=6)
+    try:
+        summary = evaluate(policy, env, episodes=2, seed=0)
+    finally:
+        env.close()
+    assert summary["episodes"] == 2 and 0.0 <= summary["success_rate"] <= 1.0
+    assert summary["mean_steps"] == 6  # truncated after max_steps
+    assert "joint_limits_violation_rate" in summary["constraints"]
+    record = summary["per_episode"][0]
+    assert record["seed"] == 0 and "peg_head_at_hole" in record

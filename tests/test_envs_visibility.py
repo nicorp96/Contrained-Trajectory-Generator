@@ -1,11 +1,11 @@
-"""Geometry of environment/camera_visibility.py on synthetic cameras."""
+"""ctg/envs/visibility.py: projection and occlusion geometry, and a run on real demonstrations."""
 
 import json
 
 import numpy as np
 import pytest
 
-from environment.camera_visibility import (
+from ctg.envs.visibility import (
     distance_to_hole, phase, pixel_diameter, project, quat_to_matrix, rim_points, summarize, visible,
 )
 
@@ -126,7 +126,7 @@ def test_summarize():
 def sim_env():
     gym = pytest.importorskip("gymnasium")
     pytest.importorskip("mani_skill")
-    import environment.extended_peg_insertion  # noqa: F401
+    import ctg.envs.peg_insertion  # noqa: F401
 
     e = gym.make(
         "PegInsertionSide-Extended", obs_mode="rgb+depth", num_envs=1, sim_backend="physx_cpu",
@@ -138,7 +138,7 @@ def sim_env():
 
 
 def test_frame_records_at_reset(sim_env):
-    from environment.camera_visibility import frame_records
+    from ctg.envs.visibility import frame_records
 
     sim_env.reset(seed=3)
     recs = frame_records(sim_env, sim_env.unwrapped.get_obs(), ["base_camera", "hand_camera", "top"])
@@ -149,19 +149,16 @@ def test_frame_records_at_reset(sim_env):
     assert 1 < base["hole_px"] < 20
 
 
-def test_main_on_one_episode(tmp_path):
+def test_measure_visibility_on_one_episode(tmp_path, demos_dir):
     pytest.importorskip("mani_skill")
-    from types import SimpleNamespace
+    from ctg.envs.visibility import measure_visibility
 
-    from environment.camera_visibility import main
-    from global_parameters import ConfigGlobalP
-    import os
-
-    h5 = os.path.join(ConfigGlobalP().DATA_DIR, "mani_skill_data/demos/PegInsertionSide-v1/motionplanning/trajectory.h5")
-    if not os.path.exists(h5):
+    h5 = demos_dir / "trajectory.h5"
+    if not h5.exists():
         pytest.skip("demonstrations not downloaded")
-    main(SimpleNamespace(h5=h5, episodes=1, every=10, resolution=64, examples=1, out=str(tmp_path)))
+    returned = measure_visibility(str(h5), str(tmp_path), episodes=1, every=10, resolution=64, examples=1)
     summary = json.loads((tmp_path / "summary.json").read_text())
+    assert returned == summary
     assert summary["final_state_success_rate"] == 1.0  # restored states reproduce the demo
     assert set(summary["visibility"]) == {"base_camera", "hand_camera", "side_right", "side_low", "top", "front_right"}
     assert any(p.suffix == ".png" for p in tmp_path.iterdir())

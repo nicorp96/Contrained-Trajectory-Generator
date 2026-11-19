@@ -6,8 +6,8 @@ import pytest
 gym = pytest.importorskip("gymnasium")
 pytest.importorskip("mani_skill")
 
-import environment.extended_peg_insertion  # noqa: E402,F401
-from environment.extended_peg_insertion import camera_config  # noqa: E402
+import ctg.envs.peg_insertion  # noqa: E402,F401
+from ctg.envs.peg_insertion import camera_config  # noqa: E402
 
 
 def test_camera_config_defaults_and_pose():
